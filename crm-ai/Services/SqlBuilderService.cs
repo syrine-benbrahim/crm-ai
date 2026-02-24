@@ -123,8 +123,24 @@ namespace crm_ai.Services
                 {
                     "Yesterday" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) >= DATEADD(DAY,-1,GETDATE())",
                     "<= 7 days" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) >= DATEADD(DAY,-7,GETDATE())",
-                    _ => "1=1"
+                    "8-14 days" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) BETWEEN DATEADD(DAY,-14,GETDATE()) AND DATEADD(DAY,-8,GETDATE())",
+                    "15-31 days" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) BETWEEN DATEADD(DAY,-31,GETDATE()) AND DATEADD(DAY,-15,GETDATE())",
+                    "1-2 months" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) BETWEEN DATEADD(MONTH,-2,GETDATE()) AND DATEADD(MONTH,-1,GETDATE())",
+                    "2-3 months" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) BETWEEN DATEADD(MONTH,-3,GETDATE()) AND DATEADD(MONTH,-2,GETDATE())",
+                    "3-4 Months" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) BETWEEN DATEADD(MONTH,-4,GETDATE()) AND DATEADD(MONTH,-3,GETDATE())",
+                    "4 months +" => "(SELECT MAX(v.VisitDateTime) FROM Visits v WHERE v.CustomerId = c.Id) <= DATEADD(MONTH,-4,GETDATE())",
+                    _ => string.Empty
                 };
+            }
+
+            if (dataType == "cityregion")
+            {
+                var regionCities = GetRegionCities(value);
+                if (!regionCities.Any())
+                    return string.Empty;
+
+                var citiesSql = string.Join(", ", regionCities.Select(c => $"'{c}'"));
+                return $"a.City IN ({citiesSql})";
             }
 
             if (dataType == "number")
@@ -141,7 +157,16 @@ namespace crm_ai.Services
                     return $"{field} >= {num}";
                 }
 
-                return $"{field} {op} {value}";
+                return op switch
+                {
+                    "IS" or "=" => $"{field} = {value}",
+                    "IS NOT" or "!=" => $"{field} != {value}",
+                    ">" => $"{field} > {value}",
+                    "<" => $"{field} < {value}",
+                    ">=" => $"{field} >= {value}",
+                    "<=" => $"{field} <= {value}",
+                    _ => $"{field} = {value}"
+                };
             }
 
             if (dataType == "date")
@@ -152,10 +177,12 @@ namespace crm_ai.Services
 
             return op switch
             {
+                "IS" or "=" => $"{field} = '{Escape(value)}'",        
+                "IS NOT" or "!=" => $"{field} != '{Escape(value)}'",  
                 "CONTAINS" => $"{field} LIKE '%{Escape(value)}%'",
                 "STARTS WITH" => $"{field} LIKE '{Escape(value)}%'",
                 "ENDS WITH" => $"{field} LIKE '%{Escape(value)}'",
-                _ => $"{field} {op} '{Escape(value)}'"
+                _ => $"{field} = '{Escape(value)}'"                   
             };
         }
 
@@ -190,6 +217,24 @@ namespace crm_ai.Services
         {
             return !string.IsNullOrWhiteSpace(field) &&
                    field.All(c => char.IsLetterOrDigit(c) || c == '_');
+        }
+
+        private static List<string> GetRegionCities(string regionName)
+        {
+            return regionName switch
+            {
+                "East" => new List<string> { "Cambridge", "Ipswich", "Norwich", "Peterborough" },
+                "London" => new List<string> { "London E", "London EC", "London N", "London NW", "London SE", "London SW", "London W", "London WC" },
+                "Midlands" => new List<string> { "Birmingham", "Coventry", "Derby", "Dudley", "Hereford", "Leicester", "Lincoln", "Nottingham", "Northampton", "Stoke-On-Trent", "Shrewsbury", "Telford", "Worcester", "Walsall", "Wolverhampton" },
+                "N.Ireland" => new List<string> { "Belfast" },
+                "North East" => new List<string> { "Bradford", "Durham", "Darlington", "Doncaster", "Huddersfield", "Harrogate", "Hull", "Halifax", "Leeds", "Newcastle Upon Tyne", "Sheffield", "Sunderland", "Cleveland", "Wakefield", "York" },
+                "North West" => new List<string> { "Blackburn", "Bolton", "Carlisle", "Chester", "Crewe", "Blackpool", "Liverpool", "Lancaster", "Manchester", "Oldham", "Preston", "Stockport", "Warrington", "Wigan" },
+                "Scotland" => new List<string> { "Aberdeen", "Dundee", "Dumfries and Galloway", "Edinburgh", "Falkirk and Stirling", "Glasgow", "Outer Hebrides", "Inverness", "Kilmarnock", "Kirkwall", "Kirkcaldy", "Motherwell", "Paisley", "Perth", "Galashiels", "Shetland" },
+                "South East" => new List<string> { "St. Albans", "Brighton", "Bromley", "Chelmsford", "Colchester", "Croydon", "Canterbury", "Dartford", "Enfield", "Harrow", "Hemel Hempstead", "Ilford", "Kingston upon Thames", "Luton", "Rochester", "Milton Keynes", "Oxford", "Portsmouth", "Reading", "Redhill", "Romford", "Stevenage", "Slough", "Sutton", "Southampton", "Southend-on-Sea", "Tonbridge", "Twickenham", "Southall", "Watford" },
+                "South West" => new List<string> { "Bath", "Bournemouth", "Bristol", "Dorchester", "Exeter", "Gloucester", "Guildford", "Plymouth", "Swindon", "Salisbury", "Taunton", "Newton Abbot", "Truro", "Torquay" },
+                "Wales" => new List<string> { "Cardiff", "Brecon", "Llandudno", "Newport", "Swansea" },
+                _ => new List<string>()
+            };
         }
     }
 }
