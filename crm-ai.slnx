@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="crm-ai.Tests/crm-ai.Tests.csproj" Id="cfb462b3-9006-4c30-961e-de9bf8524dbe" />
   <Project Path="crm-ai/crm-ai.csproj" />
 </Solution>

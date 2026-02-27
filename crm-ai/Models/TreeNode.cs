@@ -12,6 +12,6 @@
         public string? EntityName { get; set; }  // Add ? here
         public string? FieldName { get; set; }  // Add ? here
         public string? DataType { get; set; }  // Add ? here
-        public int IsSelectable { get; set; }  // Change bool to int
+        public int IsSelectable { get; set; }  
     }
 }

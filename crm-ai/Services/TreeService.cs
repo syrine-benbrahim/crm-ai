@@ -1,11 +1,12 @@
 ﻿using crm_ai.Data;
-using crm_ai.Models;
 using crm_ai.DTOs;
+using crm_ai.Models;
+using crm_ai.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace crm_ai.Services
 {
-    public class TreeService
+    public class TreeService : ITreeService
     {
         private readonly AppDbContext _context;
 

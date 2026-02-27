@@ -1,11 +1,13 @@
 ﻿using crm_ai.Data;
 using crm_ai.DTOs;
+using crm_ai.Helpers;
 using crm_ai.Models;
+using crm_ai.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 namespace crm_ai.Services
 {
-    public class SqlBuilderService
+    public class SqlBuilderService : ISqlBuilderService
     {
         private readonly AppDbContext _context;
 
@@ -14,11 +16,11 @@ namespace crm_ai.Services
             "AND", "OR", "EXCLUDE"
         };
 
-        // 🔥 Entity → Alias mapping
         private static readonly Dictionary<string, string> EntityAliases = new(StringComparer.OrdinalIgnoreCase)
         {
             { "Customer", "c" },
-            { "CustomerAddress", "a" }
+            { "CustomerAddress", "a" },
+            { "Transaction", "t" }
         };
 
         public SqlBuilderService(AppDbContext context)
@@ -29,11 +31,8 @@ namespace crm_ai.Services
         public async Task<(string WhereClause, string JoinClause)> BuildQueryPartsAsync(SelectionGroupDto group)
         {
             var usedEntities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
             var where = await BuildGroupAsync(group, usedEntities);
-
             var joins = BuildJoinClause(usedEntities);
-
             return (where, joins);
         }
 
@@ -54,7 +53,6 @@ namespace crm_ai.Services
             if (group.Rules != null && group.Rules.Any())
             {
                 var ids = group.Rules.Select(r => r.TreeNodeId).Distinct().ToList();
-
                 nodeMap = await _context.TreeNodes
                     .Where(x => ids.Contains(x.Id))
                     .ToDictionaryAsync(x => x.Id);
@@ -104,19 +102,16 @@ namespace crm_ai.Services
             string value = rule.Value?.Trim() ?? "";
             string op = rule.Operator?.Trim().ToUpper() ?? "=";
 
-            // 🔥 Visit Count
             if (dataType == "visitcount")
             {
                 if (value.EndsWith("+"))
                 {
-                    var num = int.Parse(value.Replace("+", ""));
+                    var num = SafeNumber(value.Replace("+", ""));
                     return $"(SELECT COUNT(*) FROM Visits v WHERE v.CustomerId = c.Id) >= {num}";
                 }
-
-                return $"(SELECT COUNT(*) FROM Visits v WHERE v.CustomerId = c.Id) = {value}";
+                return $"(SELECT COUNT(*) FROM Visits v WHERE v.CustomerId = c.Id) = {SafeNumber(value)}";
             }
 
-            // 🔥 Visit Recency
             if (dataType == "visitrecency")
             {
                 return value switch
@@ -148,25 +143,35 @@ namespace crm_ai.Services
                 if (value.Contains("-"))
                 {
                     var parts = value.Split("-");
-                    return $"{field} BETWEEN {parts[0]} AND {parts[1]}";
+                    if (parts.Length != 2)
+                        throw new ArgumentException($"Invalid range value: {value}");
+                    return $"{field} BETWEEN {SafeNumber(parts[0])} AND {SafeNumber(parts[1])}";
                 }
 
                 if (value.EndsWith("+"))
+                    return $"{field} >= {SafeNumber(value.Replace("+", ""))}";
+
+                return SqlOperatorMapper.MapNumber(op, field, SafeNumber(value));
+            }
+
+            if (dataType == "spendrange")
+            {
+                var cleanValue = value.Replace("£", "").Replace("ú", "").Trim();
+
+                if (cleanValue.StartsWith("<"))
+                    return $"{field} < {SafeNumber(cleanValue.Replace("<", "").Trim())}";
+
+                if (cleanValue.EndsWith("+"))
+                    return $"{field} >= {SafeNumber(cleanValue.Replace("+", "").Trim())}";
+
+                if (cleanValue.Contains("-"))
                 {
-                    var num = value.Replace("+", "");
-                    return $"{field} >= {num}";
+                    var parts = cleanValue.Split("-");
+                    if (parts.Length == 2)
+                        return $"{field} BETWEEN {SafeNumber(parts[0].Trim())} AND {SafeNumber(parts[1].Trim())}";
                 }
 
-                return op switch
-                {
-                    "IS" or "=" => $"{field} = {value}",
-                    "IS NOT" or "!=" => $"{field} != {value}",
-                    ">" => $"{field} > {value}",
-                    "<" => $"{field} < {value}",
-                    ">=" => $"{field} >= {value}",
-                    "<=" => $"{field} <= {value}",
-                    _ => $"{field} = {value}"
-                };
+                return string.Empty;
             }
 
             if (dataType == "date")
@@ -175,24 +180,14 @@ namespace crm_ai.Services
             if (dataType == "bool")
                 return $"{field} = {(value.ToLower() == "true" ? 1 : 0)}";
 
-            return op switch
-            {
-                "IS" or "=" => $"{field} = '{Escape(value)}'",        
-                "IS NOT" or "!=" => $"{field} != '{Escape(value)}'",  
-                "CONTAINS" => $"{field} LIKE '%{Escape(value)}%'",
-                "STARTS WITH" => $"{field} LIKE '{Escape(value)}%'",
-                "ENDS WITH" => $"{field} LIKE '%{Escape(value)}'",
-                _ => $"{field} = '{Escape(value)}'"                   
-            };
+            return SqlOperatorMapper.MapString(op, field, Escape(value));
         }
 
         private string GetQualifiedField(TreeNode node)
         {
             var entity = node.EntityName ?? "Customer";
-
             if (!EntityAliases.TryGetValue(entity, out var alias))
                 alias = "c";
-
             return $"{alias}.{node.FieldName}";
         }
 
@@ -201,9 +196,10 @@ namespace crm_ai.Services
             var joins = new List<string>();
 
             if (usedEntities.Contains("CustomerAddress"))
-            {
                 joins.Add("LEFT JOIN CustomerAddresses a ON a.CustomerId = c.Id");
-            }
+
+            if (usedEntities.Contains("Transaction"))
+                joins.Add("LEFT JOIN Transactions t ON t.CustomerId = c.Id");
 
             return string.Join(" ", joins);
         }
@@ -213,7 +209,7 @@ namespace crm_ai.Services
             return value.Replace("'", "''");
         }
 
-        private static bool IsValidFieldName(string field)
+        private static bool IsValidFieldName(string? field)
         {
             return !string.IsNullOrWhiteSpace(field) &&
                    field.All(c => char.IsLetterOrDigit(c) || c == '_');
@@ -235,6 +231,16 @@ namespace crm_ai.Services
                 "Wales" => new List<string> { "Cardiff", "Brecon", "Llandudno", "Newport", "Swansea" },
                 _ => new List<string>()
             };
+        }
+
+        private static string SafeNumber(string value)
+        {
+            value = value.Trim();
+            if (decimal.TryParse(value, System.Globalization.NumberStyles.Number,
+                System.Globalization.CultureInfo.InvariantCulture, out var n))
+                return n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            throw new ArgumentException($"Invalid numeric value: {value}");
         }
     }
 }

@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using crm_ai.Data;
 
@@ -11,9 +12,11 @@ using crm_ai.Data;
 namespace crm_ai.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260226211042_AddStatusAndUpdatedAt")]
+    partial class AddStatusAndUpdatedAt
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -231,10 +234,6 @@ namespace crm_ai.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("EmailsJson")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<DateTime>("ExecutedAt")
                         .HasColumnType("datetime2");
 
@@ -249,6 +248,27 @@ namespace crm_ai.Migrations
                     b.HasIndex("SelectionId");
 
                     b.ToTable("SelectionExecutions");
+                });
+
+            modelBuilder.Entity("crm_ai.Models.SelectionExecutionUser", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("CustomerId")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SelectionExecutionId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SelectionExecutionId");
+
+                    b.ToTable("SelectionExecutionUsers");
                 });
 
             modelBuilder.Entity("crm_ai.Models.SelectionGroup", b =>
@@ -504,6 +524,17 @@ namespace crm_ai.Migrations
                     b.Navigation("Selection");
                 });
 
+            modelBuilder.Entity("crm_ai.Models.SelectionExecutionUser", b =>
+                {
+                    b.HasOne("crm_ai.Models.SelectionExecution", "SelectionExecution")
+                        .WithMany("Users")
+                        .HasForeignKey("SelectionExecutionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SelectionExecution");
+                });
+
             modelBuilder.Entity("crm_ai.Models.SelectionGroup", b =>
                 {
                     b.HasOne("crm_ai.Models.SelectionGroup", "ParentGroup")
@@ -652,6 +683,11 @@ namespace crm_ai.Migrations
                     b.Navigation("Groups");
 
                     b.Navigation("SelectionExecutions");
+                });
+
+            modelBuilder.Entity("crm_ai.Models.SelectionExecution", b =>
+                {
+                    b.Navigation("Users");
                 });
 
             modelBuilder.Entity("crm_ai.Models.SelectionGroup", b =>

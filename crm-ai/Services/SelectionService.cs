@@ -1,19 +1,17 @@
 ﻿using crm_ai.Data;
 using crm_ai.DTOs;
 using crm_ai.Models;
+using crm_ai.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
-using System.Text.Json;
 
 namespace crm_ai.Services
 {
-    public class SelectionService
+    public class SelectionService : ISelectionService
     {
         private readonly AppDbContext _context;
-        private readonly SqlBuilderService _sqlBuilder;
+        private readonly ISqlBuilderService _sqlBuilder;
 
-        public SelectionService(
-            AppDbContext context,
-            SqlBuilderService sqlBuilder)
+        public SelectionService(AppDbContext context, ISqlBuilderService sqlBuilder)
         {
             _context = context;
             _sqlBuilder = sqlBuilder;
@@ -25,6 +23,8 @@ namespace crm_ai.Services
             {
                 Name = dto.Name,
                 CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow,  
+                Status = "Active",             
                 Groups = new List<SelectionGroup>()
             };
 
@@ -54,9 +54,6 @@ namespace crm_ai.Services
         {joinClause}
         WHERE {whereClause}";
 
-            Console.WriteLine("===== PREVIEW QUERY =====");
-            Console.WriteLine(query);
-
             var customers = await _context.Customers
                 .FromSqlRaw(query)
                 .ToListAsync();
@@ -69,80 +66,6 @@ namespace crm_ai.Services
             };
         }
 
-        private SelectionGroup BuildGroup(
-            SelectionGroupDto dto,
-            SelectionGroup? parent,
-            Selection selection)
-        {
-            var group = new SelectionGroup
-            {
-                Selection = selection,
-                ParentGroup = parent,
-                LogicalOperator = dto.LogicalOperator,
-                Rules = new List<SelectionRule>(),
-                ChildGroups = new List<SelectionGroup>()
-            };
-
-            // Rules
-            if (dto.Rules != null)
-            {
-                foreach (var ruleDto in dto.Rules)
-                {
-                    group.Rules.Add(new SelectionRule
-                    {
-                        TreeNodeId = ruleDto.TreeNodeId,
-                        Operator = ruleDto.Operator,
-                        Value = ruleDto.Value
-                    });
-                }
-            }
-
-            // Child Groups (recursive)
-            if (dto.Groups != null)
-            {
-                foreach (var child in dto.Groups)
-                {
-                    group.ChildGroups.Add(
-                        BuildGroup(child, group, selection));
-                }
-            }
-
-            return group;
-        }
-        private async Task<string> BuildGroupSql(SelectionGroup group)
-        {
-            var conditions = new List<string>();
-
-            // Load TreeNodes for rules
-            foreach (var rule in group.Rules)
-            {
-                var node = await _context.TreeNodes
-                    .FirstOrDefaultAsync(t => t.Id == rule.TreeNodeId);
-
-                if (node == null || string.IsNullOrEmpty(node.FieldName))
-                    continue;
-
-                conditions.Add(BuildCondition(node, rule));
-            }
-
-            // Load child groups recursively
-            var childGroups = await _context.SelectionGroups
-                .Where(g => g.ParentGroupId == group.Id)
-                .Include(g => g.Rules)
-                .ToListAsync();
-
-            foreach (var child in childGroups)
-            {
-                var childSql = await BuildGroupSql(child);
-                if (!string.IsNullOrWhiteSpace(childSql))
-                    conditions.Add($"({childSql})");
-            }
-
-            if (!conditions.Any())
-                return "1=1";
-
-            return string.Join($" {group.LogicalOperator} ", conditions);
-        }
         public async Task<object> ExecuteSelection(int id)
         {
             var selection = await _context.Selections
@@ -176,23 +99,18 @@ namespace crm_ai.Services
         {joinClause}
         WHERE {whereClause}";
 
-            Console.WriteLine("===== EXECUTE QUERY =====");
-            Console.WriteLine(query);
-
             var customers = await _context.Customers
                 .FromSqlRaw(query)
                 .ToListAsync();
 
-            // 🔥 Save execution
+            var emails = customers.Select(c => c.Email).ToList();
+
             var execution = new SelectionExecution
             {
                 SelectionId = selection.Id,
                 ExecutedAt = DateTime.UtcNow,
                 TotalUsers = customers.Count,
-                Users = customers.Select(c => new SelectionExecutionUser
-                {
-                    CustomerId = c.Id
-                }).ToList()
+                EmailsJson = System.Text.Json.JsonSerializer.Serialize(emails)
             };
 
             _context.SelectionExecutions.Add(execution);
@@ -202,62 +120,178 @@ namespace crm_ai.Services
             {
                 ExecutionId = execution.Id,
                 TotalUsers = execution.TotalUsers,
-                Emails = customers.Select(c => c.Email)
+                Emails = emails
             };
         }
 
         public async Task<List<object>> GetExecutions(int selectionId)
         {
-            return await _context.SelectionExecutions
+            var executions = await _context.SelectionExecutions
                 .Where(e => e.SelectionId == selectionId)
-                .Select(e => (object)new
+                .OrderByDescending(e => e.ExecutedAt)
+                .ToListAsync();
+
+            return executions.Select(e => (object)new
+            {
+                e.Id,
+                e.ExecutedAt,
+                e.TotalUsers,
+                Emails = string.IsNullOrEmpty(e.EmailsJson)
+                    ? new List<string>()
+                    : System.Text.Json.JsonSerializer.Deserialize<List<string>>(e.EmailsJson)
+            }).ToList();
+        }
+
+        public async Task<List<object>> GetAllSelections()
+        {
+            return await _context.Selections
+                .OrderByDescending(s => s.CreatedAt)
+                .Select(s => (object)new
                 {
-                    e.Id,
-                    e.ExecutedAt,
-                    e.TotalUsers
+                    s.Id,
+                    s.Name,
+                    s.CreatedAt,
+                    s.UpdatedAt,   
+                    s.Status,
+                    RuleCount = s.Groups.SelectMany(g => g.Rules).Count()
                 })
                 .ToListAsync();
         }
-        private string BuildCondition(TreeNode node, SelectionRule rule)
+
+        public async Task<object> GetSelectionById(int id)
         {
-            var field = node.FieldName;
-            var dataType = node.DataType?.ToLower() ?? "string";
-            var value = rule.Value;
+            var selection = await _context.Selections
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.Rules)
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.ChildGroups)
+                        .ThenInclude(g => g.Rules)
+                .AsSplitQuery()
+                .FirstOrDefaultAsync(s => s.Id == id);
 
-            // Handle 18-24 range
-            if (dataType == "number" && value.Contains("-"))
+            if (selection == null)
+                throw new Exception("Selection not found");
+
+            var rootGroup = selection.Groups
+                .FirstOrDefault(g => g.ParentGroupId == null);
+
+            return new
             {
-                var parts = value.Split('-');
-                if (int.TryParse(parts[0], out int min) &&
-                    int.TryParse(parts[1], out int max))
-                {
-                    return $"{field} BETWEEN {min} AND {max}";
-                }
-            }
-
-            if (dataType == "number")
-                return $"{field} {rule.Operator} {value}";
-
-            return $"{field} = '{value}'";
-        }
-        private SelectionGroupDto MapToDto(SelectionGroup group)
-        {
-            return new SelectionGroupDto
-            {
-                LogicalOperator = group.LogicalOperator,
-                Rules = group.Rules?.Select(r => new SelectionRuleDto
-                {
-                    TreeNodeId = r.TreeNodeId,
-                    Operator = r.Operator,
-                    Value = r.Value
-                }).ToList(),
-
-                Groups = group.ChildGroups?
-                    .Select(child => MapToDto(child))
-                    .ToList()
+                selection.Id,
+                selection.Name,
+                selection.CreatedAt,
+                selection.UpdatedAt,   
+                selection.Status,
+                RootGroup = MapToDto(rootGroup)
             };
         }
 
+        public async Task DeleteSelection(int id)
+        {
+            var selection = await _context.Selections
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.Rules)
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.ChildGroups)
+                        .ThenInclude(g => g.Rules)
+                .Include(s => s.SelectionExecutions)
+                .FirstOrDefaultAsync(s => s.Id == id);
 
+            if (selection == null)
+                throw new Exception("Selection not found");
+
+            _context.Selections.Remove(selection);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task UpdateSelection(int id, SelectionRequestDto dto)
+        {
+            var selection = await _context.Selections
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.Rules)
+                .Include(s => s.Groups)
+                    .ThenInclude(g => g.ChildGroups)
+                        .ThenInclude(g => g.Rules)
+                .FirstOrDefaultAsync(s => s.Id == id);
+
+            if (selection == null)
+                throw new Exception("Selection not found");
+
+            // Remove all old groups and rules
+            _context.SelectionGroups.RemoveRange(selection.Groups);
+            await _context.SaveChangesAsync();
+
+            // Rebuild from new dto
+            if (!string.IsNullOrWhiteSpace(dto.Name))
+                selection.Name = dto.Name;
+
+            if (!string.IsNullOrWhiteSpace(dto.Name))
+                selection.Name = dto.Name;
+
+            selection.UpdatedAt = DateTime.UtcNow;
+
+            var rootGroup = BuildGroup(dto.RootGroup, null, selection);
+            selection.Groups = new List<SelectionGroup> { rootGroup };
+
+            await _context.SaveChangesAsync();
+        }
+
+        private SelectionGroup BuildGroup(
+            SelectionGroupDto dto,
+            SelectionGroup? parent,
+            Selection selection)
+        {
+            var group = new SelectionGroup
+            {
+                Selection = selection,
+                ParentGroup = parent,
+                LogicalOperator = dto.LogicalOperator,
+                Rules = new List<SelectionRule>(),
+                ChildGroups = new List<SelectionGroup>()
+            };
+
+            if (dto.Rules != null)
+            {
+                foreach (var ruleDto in dto.Rules)
+                {
+                    group.Rules.Add(new SelectionRule
+                    {
+                        TreeNodeId = ruleDto.TreeNodeId,
+                        Operator = ruleDto.Operator,
+                        Value = ruleDto.Value
+                    });
+                }
+            }
+
+            if (dto.Groups != null)
+            {
+                foreach (var child in dto.Groups)
+                {
+                    group.ChildGroups.Add(BuildGroup(child, group, selection));
+                }
+            }
+
+            return group;
+        }
+
+        public SelectionGroupDto MapToDto(SelectionGroup group)
+        {
+            if (group == null) return null;
+
+            return new SelectionGroupDto
+            {
+                LogicalOperator = group.LogicalOperator,
+                Rules = group.Rules?
+                    .Select(r => new SelectionRuleDto
+                    {
+                        TreeNodeId = r.TreeNodeId,
+                        Operator = r.Operator,
+                        Value = r.Value
+                    }).ToList() ?? new List<SelectionRuleDto>(),
+                Groups = group.ChildGroups?
+                    .Select(child => MapToDto(child))
+                    .ToList() ?? new List<SelectionGroupDto>()
+            };
+        }
     }
 }

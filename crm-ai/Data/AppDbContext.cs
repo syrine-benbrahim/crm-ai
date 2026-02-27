@@ -28,7 +28,6 @@
         public DbSet<SelectionGroup> SelectionGroups { get; set; }
         public DbSet<SelectionRule> SelectionRules { get; set; }
         public DbSet<SelectionExecution> SelectionExecutions { get; set; }
-        public DbSet<SelectionExecutionUser> SelectionExecutionUsers { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {

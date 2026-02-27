@@ -1,11 +1,17 @@
 using crm_ai.Data;
 using crm_ai.Services;
+using crm_ai.Services.Interfaces;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.ReferenceHandler =
+            System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+    });
 
 // ⭐ CRITICAL: Add CORS Policy
 builder.Services.AddCors(options =>
@@ -33,9 +39,9 @@ builder.Services.AddDbContext<AppDbContext>(options =>
         builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Services
-builder.Services.AddScoped<TreeService>();
-builder.Services.AddScoped<SelectionService>();
-builder.Services.AddScoped<SqlBuilderService>();
+builder.Services.AddScoped<ITreeService, TreeService>();
+builder.Services.AddScoped<ISelectionService, SelectionService>();
+builder.Services.AddScoped<ISqlBuilderService, SqlBuilderService>();
 
 var app = builder.Build();
 

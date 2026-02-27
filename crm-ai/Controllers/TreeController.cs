@@ -1,4 +1,4 @@
-﻿using crm_ai.Services;
+﻿using crm_ai.Services.Interfaces;
 using Microsoft.AspNetCore.Mvc;
 
 namespace crm_ai.Controllers
@@ -7,9 +7,8 @@ namespace crm_ai.Controllers
     [Route("api/tree")]
     public class TreeController : ControllerBase
     {
-        private readonly TreeService _treeService;
-
-        public TreeController(TreeService treeService)
+        private readonly ITreeService _treeService;
+        public TreeController(ITreeService treeService)
         {
             _treeService = treeService;
         }
