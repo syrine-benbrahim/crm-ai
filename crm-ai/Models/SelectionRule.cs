@@ -8,7 +8,6 @@
         public SelectionGroup Group { get; set; }
 
         public int TreeNodeId { get; set; }
-        public TreeNode TreeNode { get; set; }
 
         public string Operator { get; set; }
         public string Value { get; set; }

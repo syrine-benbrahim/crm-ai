@@ -4,14 +4,14 @@
     {
         public int Id { get; set; }
         public int? ParentId { get; set; }
-        public TreeNode? Parent { get; set; }  // Add ? here
-        public List<TreeNode>? Children { get; set; }  // Add ? here
+        public TreeNode? Parent { get; set; }  
+        public List<TreeNode>? Children { get; set; }  
         public string NodeCode { get; set; }
         public string NodeName { get; set; }
-        public string? NodeDesc { get; set; }  // Add ? here
-        public string? EntityName { get; set; }  // Add ? here
-        public string? FieldName { get; set; }  // Add ? here
-        public string? DataType { get; set; }  // Add ? here
+        public string? NodeDesc { get; set; }  
+        public string? EntityName { get; set; }  
+        public string? FieldName { get; set; }  
+        public string? DataType { get; set; }  
         public int IsSelectable { get; set; }  
     }
 }

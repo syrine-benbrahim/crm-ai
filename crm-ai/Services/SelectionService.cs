@@ -22,9 +22,10 @@ namespace crm_ai.Services
             var selection = new Selection
             {
                 Name = dto.Name,
+                Description = dto.Description,  // null, manual, or AI-generated — all fine
                 CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,  
-                Status = "Active",             
+                UpdatedAt = DateTime.UtcNow,
+                Status = "Active",
                 Groups = new List<SelectionGroup>()
             };
 
@@ -150,8 +151,9 @@ namespace crm_ai.Services
                 {
                     s.Id,
                     s.Name,
+                    s.Description,   // ← ADDED
                     s.CreatedAt,
-                    s.UpdatedAt,   
+                    s.UpdatedAt,
                     s.Status,
                     RuleCount = s.Groups.SelectMany(g => g.Rules).Count()
                 })
@@ -179,8 +181,9 @@ namespace crm_ai.Services
             {
                 selection.Id,
                 selection.Name,
+                selection.Description,   // ← ADDED
                 selection.CreatedAt,
-                selection.UpdatedAt,   
+                selection.UpdatedAt,
                 selection.Status,
                 RootGroup = MapToDto(rootGroup)
             };
@@ -225,9 +228,9 @@ namespace crm_ai.Services
             if (!string.IsNullOrWhiteSpace(dto.Name))
                 selection.Name = dto.Name;
 
-            if (!string.IsNullOrWhiteSpace(dto.Name))
-                selection.Name = dto.Name;
+            // ← REMOVED duplicate Name line that was here
 
+            selection.Description = dto.Description;   // ← ADDED (nullable, always set)
             selection.UpdatedAt = DateTime.UtcNow;
 
             var rootGroup = BuildGroup(dto.RootGroup, null, selection);
