@@ -15,12 +15,16 @@ namespace crm_ai.DTOs.Grok
 
         [JsonPropertyName("max_tokens")]
         public int MaxTokens { get; set; } = 300;
+
+        [JsonPropertyName("reasoning_effort")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReasoningEffort { get; set; }
     }
 
     public class GrokMessage
     {
         [JsonPropertyName("role")]
-        public string Role { get; set; } = string.Empty;   // "system" | "user"
+        public string Role { get; set; } = string.Empty;
 
         [JsonPropertyName("content")]
         public string Content { get; set; } = string.Empty;

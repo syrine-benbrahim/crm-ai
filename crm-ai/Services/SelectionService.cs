@@ -59,12 +59,29 @@ namespace crm_ai.Services
                 .FromSqlRaw(query)
                 .ToListAsync();
 
+            var sample = customers.Take(10).Select(c => new
+            {
+                c.Id,
+                Name = (c.FirstName + " " + c.LastName).Trim(),
+                Email = MaskEmail(c.Email),
+                c.Gender,
+                c.BirthDate  
+            });
+
             return new
             {
                 TotalCount = customers.Count,
-                SampleEmails = customers.Take(20).Select(c => c.Email),
+                Sample = sample,
                 WhereClause = whereClause
             };
+        }
+
+        private static string MaskEmail(string? email)
+        {
+            if (string.IsNullOrEmpty(email)) return "—";
+            var at = email.IndexOf('@');
+            if (at <= 1) return "***" + email[at..];
+            return email[0] + new string('*', at - 1) + email[at..];
         }
 
         public async Task<object> ExecuteSelection(int id)
@@ -145,19 +162,48 @@ namespace crm_ai.Services
 
         public async Task<List<object>> GetAllSelections()
         {
-            return await _context.Selections
+            var latestExecutions = await _context.SelectionExecutions
+                .GroupBy(e => e.SelectionId)
+                .Select(g => new
+                {
+                    SelectionId = g.Key,
+                    TotalUsers = g.OrderByDescending(e => e.ExecutedAt)
+                                  .First().TotalUsers,
+                    LastExecutedAt = g.OrderByDescending(e => e.ExecutedAt)
+                                      .First().ExecutedAt
+                })
+                .ToDictionaryAsync(e => e.SelectionId);
+
+            var selections = await _context.Selections
                 .OrderByDescending(s => s.CreatedAt)
-                .Select(s => (object)new
+                .Select(s => new
                 {
                     s.Id,
                     s.Name,
-                    s.Description,   // ← ADDED
+                    s.Description,
                     s.CreatedAt,
                     s.UpdatedAt,
                     s.Status,
                     RuleCount = s.Groups.SelectMany(g => g.Rules).Count()
                 })
                 .ToListAsync();
+
+            return selections.Select(s =>
+            {
+                latestExecutions.TryGetValue(s.Id, out var exec);
+                return (object)new
+                {
+                    s.Id,
+                    s.Name,
+                    s.Description,
+                    s.CreatedAt,
+                    s.UpdatedAt,
+                    s.Status,
+                    s.RuleCount,
+                    ContactCount = exec?.TotalUsers,
+                    LastExecutedAt = exec?.LastExecutedAt
+                };
+            }).ToList();
         }
 
         public async Task<object> GetSelectionById(int id)
@@ -295,6 +341,68 @@ namespace crm_ai.Services
                     .Select(child => MapToDto(child))
                     .ToList() ?? new List<SelectionGroupDto>()
             };
+        }
+
+        public async Task<int> DuplicateSelection(int id)
+        {
+            var selection = await _context.Selections
+                .Include(s => s.Groups).ThenInclude(g => g.Rules)
+                .Include(s => s.Groups).ThenInclude(g => g.ChildGroups).ThenInclude(g => g.Rules)
+                .FirstOrDefaultAsync(s => s.Id == id);
+
+            if (selection == null)
+                throw new Exception("Selection not found");
+
+            var rootGroup = selection.Groups.FirstOrDefault(g => g.ParentGroupId == null);
+            var dto = new SelectionRequestDto
+            {
+                Name = selection.Name + " (Copy)",
+                Description = selection.Description,
+                RootGroup = MapToDto(rootGroup)
+            };
+
+            return await CreateSelection(dto);
+        }
+
+        public async Task ArchiveSelection(int id)
+        {
+            var selection = await _context.Selections
+                .FirstOrDefaultAsync(s => s.Id == id);
+
+            if (selection == null)
+                throw new Exception("Selection not found");
+
+            selection.Status = "Archived";
+            selection.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task BulkDeleteSelections(List<int> ids)
+        {
+            var selections = await _context.Selections
+                .Include(s => s.Groups).ThenInclude(g => g.Rules)
+                .Include(s => s.Groups).ThenInclude(g => g.ChildGroups).ThenInclude(g => g.Rules)
+                .Include(s => s.SelectionExecutions)
+                .Where(s => ids.Contains(s.Id))
+                .ToListAsync();
+
+            _context.Selections.RemoveRange(selections);
+            await _context.SaveChangesAsync();
+        }
+
+        public async Task BulkArchiveSelections(List<int> ids)
+        {
+            var selections = await _context.Selections
+                .Where(s => ids.Contains(s.Id))
+                .ToListAsync();
+
+            foreach (var s in selections)
+            {
+                s.Status = "Archived";
+                s.UpdatedAt = DateTime.UtcNow;
+            }
+
+            await _context.SaveChangesAsync();
         }
     }
 }

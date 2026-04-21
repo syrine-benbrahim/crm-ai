@@ -12,5 +12,9 @@ namespace crm_ai.Services.Interfaces
         Task<object> GetSelectionById(int id);
         Task DeleteSelection(int id);                         
         Task UpdateSelection(int id, SelectionRequestDto dto);
+        Task<int> DuplicateSelection(int id);
+        Task BulkDeleteSelections(List<int> ids);
+        Task BulkArchiveSelections(List<int> ids);
+        Task ArchiveSelection(int id);
     }
 }

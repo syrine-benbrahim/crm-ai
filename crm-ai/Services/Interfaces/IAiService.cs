@@ -35,5 +35,9 @@ namespace crm_ai.Services.Interfaces
         Task<ConversationResponseDto> ContinueConversationAsync(
             ConversationRequestDto request);
         Task<IntentCheckResponseDto> CheckIntentAsync(IntentCheckRequestDto request);
+
+        Task<AiDescriptionResponseDto> GenerateDescriptionOnDemandAsync(SelectionGroupDto rootGroup);
+        Task<string> GenerateNameOnDemandAsync(string description);
+        Task<(int Score, int Tokens)> ScoreConfidenceOnDemandAsync(string intent, SelectionGroupDto rootGroup);
     }
 }

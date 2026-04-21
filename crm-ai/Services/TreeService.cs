@@ -33,6 +33,8 @@ namespace crm_ai.Services
                     DataType = n.DataType,
                     EntityName = n.EntityName,
                     FieldName = n.FieldName,
+                    AiLabel = n.AiLabel,          // NEW
+                    SemanticCategory = n.SemanticCategory, // NEW
                     Children = BuildTree(nodes, n.Id)
                 })
                 .ToList();

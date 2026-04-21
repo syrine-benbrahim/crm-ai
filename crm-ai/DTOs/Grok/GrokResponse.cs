@@ -15,6 +15,9 @@ namespace crm_ai.DTOs.Grok
     {
         [JsonPropertyName("message")]
         public GrokMessage Message { get; set; } = new();
+
+        [JsonPropertyName("finish_reason")]  
+        public string? FinishReason { get; set; }
     }
 
     public class GrokUsage
@@ -22,4 +25,5 @@ namespace crm_ai.DTOs.Grok
         [JsonPropertyName("total_tokens")]
         public int TotalTokens { get; set; }
     }
+
 }

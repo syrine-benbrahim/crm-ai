@@ -247,5 +247,122 @@ namespace crm_ai.Controllers
             var result = await _aiService.CheckIntentAsync(request);
             return Ok(result);
         }
+
+        [HttpPost("{id}/duplicate")]
+        public async Task<IActionResult> Duplicate(int id)
+        {
+            try
+            {
+                var newId = await _service.DuplicateSelection(id);
+                return Ok(new { SelectionId = newId });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
+        }
+
+        [HttpPatch("{id}/archive")]
+        public async Task<IActionResult> Archive(int id)
+        {
+            try
+            {
+                await _service.ArchiveSelection(id);
+                return Ok(new { message = "Selection archived successfully" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
+        }
+
+        [HttpPatch("bulk-delete")]
+        public async Task<IActionResult> BulkDelete([FromBody] BulkActionDto dto)
+        {
+            if (dto?.Ids == null || !dto.Ids.Any())
+                return BadRequest(new { error = "No IDs provided." });
+            try
+            {
+                await _service.BulkDeleteSelections(dto.Ids);
+                return Ok(new { message = $"{dto.Ids.Count} selections deleted." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
+        }
+
+        [HttpPatch("bulk-archive")]
+        public async Task<IActionResult> BulkArchive([FromBody] BulkActionDto dto)
+        {
+            if (dto?.Ids == null || !dto.Ids.Any())
+                return BadRequest(new { error = "No IDs provided." });
+            try
+            {
+                await _service.BulkArchiveSelections(dto.Ids);
+                return Ok(new { message = $"{dto.Ids.Count} selections archived." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// POST api/selection/describe
+        /// On-demand description for an already-built rule tree.
+        /// Called when user clicks "Generate description" button.
+        /// </summary>
+        [HttpPost("describe")]
+        public async Task<IActionResult> Describe([FromBody] AiDescriptionRequestDto dto)
+        {
+            if (dto?.RootGroup == null)
+                return BadRequest(new { error = "RootGroup is required." });
+            try
+            {
+                var result = await _aiService.GenerateDescriptionOnDemandAsync(dto.RootGroup);
+                return Ok(result);
+            }
+            catch (InvalidOperationException ex) { return StatusCode(503, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+        }
+
+        /// <summary>
+        /// POST api/selection/suggest-name
+        /// On-demand name suggestion based on an existing description.
+        /// Called when user clicks "Suggest name" button.
+        /// </summary>
+        [HttpPost("suggest-name")]
+        public async Task<IActionResult> SuggestName([FromBody] AiDescriptionResponseDto dto)
+        {
+            if (string.IsNullOrWhiteSpace(dto?.Description))
+                return BadRequest(new { error = "Description is required." });
+            try
+            {
+                var name = await _aiService.GenerateNameOnDemandAsync(dto.Description);
+                return Ok(new { name });
+            }
+            catch (InvalidOperationException ex) { return StatusCode(503, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+        }
+
+        /// <summary>
+        /// POST api/selection/score-confidence
+        /// On-demand confidence score.
+        /// Called when user clicks "Check confidence" button.
+        /// </summary>
+        [HttpPost("score-confidence")]
+        public async Task<IActionResult> ScoreConfidence([FromBody] ConfidenceRequestDto dto)
+        {
+            if (string.IsNullOrWhiteSpace(dto?.Intent) || dto.RootGroup == null)
+                return BadRequest(new { error = "Intent and RootGroup are required." });
+            try
+            {
+                var (score, tokens) = await _aiService.ScoreConfidenceOnDemandAsync(dto.Intent, dto.RootGroup);
+                return Ok(new { score, tokens });
+            }
+            catch (InvalidOperationException ex) { return StatusCode(503, new { error = ex.Message }); }
+            catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+        }
     }
 }
