@@ -20,6 +20,7 @@ namespace crm_ai.Services
         private readonly AppDbContext _context;
         private readonly ILogger<AiService> _logger;
         private readonly IMemoryCache _cache;
+        private readonly IAiUsageService _usageService;
 
         private static readonly JsonSerializerOptions _jsonOptions = new()
         {
@@ -54,13 +55,15 @@ namespace crm_ai.Services
             IOptions<GrokAiOptions> options,
             AppDbContext context,
             ILogger<AiService> logger,
-            IMemoryCache cache)
+            IMemoryCache cache,
+            IAiUsageService usageService)
         {
             _httpClient = httpClientFactory.CreateClient("GrokClient");
             _options = options.Value;
             _context = context;
             _logger = logger;
             _cache = cache;
+            _usageService = usageService;
         }
 
         // ════════════════════════════════════════════════════════════════════
@@ -172,14 +175,25 @@ namespace crm_ai.Services
         // NODE CATALOG — CHANGED: reads AiLabel + SemanticCategory
         // ════════════════════════════════════════════════════════════════════
 
+        // ════════════════════════════════════════════════════════════════════
+        // NODE CATALOG — content-hash cache key, auto-invalidates on tree change
+        // ════════════════════════════════════════════════════════════════════
         private async Task<Dictionary<int, NodeCatalogItem>> BuildNodeCatalogAsync()
         {
-            const string cacheKey = "node_catalog_v5"; // ── CHANGED: bumped version
+            // One lightweight query to fingerprint the current tree state.
+            // If a node is added or removed, Count or MaxId changes → new cache key
+            // → catalog rebuilds automatically. No more manual version bumping.
+            var fingerprint = await _context.TreeNodes
+                .Where(n => n.IsSelectable == 1)
+                .GroupBy(_ => 1)
+                .Select(g => new { Count = g.Count(), MaxId = g.Max(n => n.Id) })
+                .FirstOrDefaultAsync();
+
+            var cacheKey = $"node_catalog_{fingerprint?.Count}_{fingerprint?.MaxId}";
 
             if (_cache.TryGetValue(cacheKey, out Dictionary<int, NodeCatalogItem>? cached) && cached != null)
                 return cached;
 
-            // ── CHANGED: select AiLabel and SemanticCategory from DB ──────────
             var nodes = await (
                 from child in _context.TreeNodes
                 where child.IsSelectable == 1
@@ -188,7 +202,7 @@ namespace crm_ai.Services
                 select new NodeInfo
                 {
                     Id = child.Id,
-                    ParentId = child.ParentId,              
+                    ParentId = child.ParentId,
                     NodeName = child.NodeName,
                     NodeDesc = child.NodeDesc,
                     DataType = child.DataType,
@@ -203,8 +217,8 @@ namespace crm_ai.Services
             var catalog = nodes.ToDictionary(n => n.Id, n => new NodeCatalogItem
             {
                 Id = n.Id,
-                ParentId = n.ParentId ?? 0,             // ADD
-                ParentName = n.ParentName ?? "",         // ADD
+                ParentId = n.ParentId ?? 0,
+                ParentName = n.ParentName ?? "",
                 NodeName = n.AiLabel ?? n.NodeName ?? "",
                 NodeDesc = n.AiLabel ?? n.NodeDesc ?? n.NodeName ?? "",
                 DataType = n.DataType ?? "",
@@ -213,7 +227,8 @@ namespace crm_ai.Services
             });
 
             _cache.Set(cacheKey, catalog, TimeSpan.FromHours(1));
-            _logger.LogInformation("Built node catalog with {Count} selectable nodes", catalog.Count);
+            _logger.LogInformation("Built node catalog with {Count} selectable nodes (key={Key})",
+                catalog.Count, cacheKey);
             return catalog;
         }
 
@@ -310,31 +325,30 @@ namespace crm_ai.Services
         // ════════════════════════════════════════════════════════════════════
 
         private string BuildSelectionUserPrompt(
-            string userRequest, Dictionary<int, NodeCatalogItem> catalog)
+    string userRequest, Dictionary<int, NodeCatalogItem> catalog)
         {
-            const int MaxNodes = 120;
-            var nodes = catalog.Values.ToList();
+            // If the catalog was already filtered (≤200 nodes), trust the filter
+            // and use all of them. Only cap when working with a large unfiltered set.
+            const int MaxNodesUnfiltered = 120;
+            const int MaxNodesFiltered = 200;
 
-            if (nodes.Count > MaxNodes)
+            var nodes = catalog.Values.ToList();
+            int effectiveMax = nodes.Count <= MaxNodesFiltered ? nodes.Count : MaxNodesUnfiltered;
+
+            if (nodes.Count > effectiveMax)
             {
                 var categoryCount = nodes.Select(n => n.Category).Distinct().Count();
                 nodes = nodes
                     .GroupBy(n => n.Category).OrderBy(g => g.Key)
-                    .SelectMany(g => g.Take(Math.Max(1, (int)Math.Ceiling((double)MaxNodes / categoryCount))))
-                    .Take(MaxNodes).ToList();
+                    .SelectMany(g => g.Take(Math.Max(1, (int)Math.Ceiling((double)effectiveMax / categoryCount))))
+                    .Take(effectiveMax).ToList();
             }
 
-            // ── CHANGED: cache the catalog string keyed by the node ID set ───
-            // This avoids rebuilding the same string on every call when the
-            // filtered set is the same (very common for repeated turn topics).
             var catalogCacheKey = "catalog_str_" +
                 string.Join(",", nodes.Select(n => n.Id).OrderBy(x => x));
 
             if (!_cache.TryGetValue(catalogCacheKey, out string? catalogStr))
             {
-                // ── CHANGED: compressed format saves ~35% tokens vs old format ─
-                // Old: [Gender]: ID=13 "Male" | ID=14 "Female"
-                // New: Gender:13=Male,14=Female
                 var sb = new StringBuilder("FILTERS (ID=label):\n");
                 foreach (var group in nodes.GroupBy(n => n.Category).OrderBy(g => g.Key))
                 {
@@ -385,18 +399,90 @@ namespace crm_ai.Services
         /// Returns structured clarification blocks when 2–4 parent groups score > 0.
         /// Returns null when the prompt maps clearly to 0 or 1 group (let normal build run).
         /// </summary>
+        // ════════════════════════════════════════════════════════════════════
+        // BUILD CATEGORY KEYWORDS — seeded from live catalog, not a static list
+        // ════════════════════════════════════════════════════════════════════
+        private static Dictionary<string, HashSet<string>> BuildCategoryKeywords(
+            Dictionary<int, NodeCatalogItem> catalog)
+        {
+            // Step 1 — seed from actual node data.
+            // Every meaningful word in every node's SearchText becomes a keyword
+            // for that category. This means city names, age values, day names,
+            // spend ranges etc. are all covered automatically from your own data.
+            var result = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var node in catalog.Values)
+            {
+                if (string.IsNullOrWhiteSpace(node.Category)) continue;
+
+                if (!result.TryGetValue(node.Category, out var set))
+                {
+                    set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    result[node.Category] = set;
+                }
+
+                var words = node.SearchText
+                    .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(w => w.Length > 2);
+
+                foreach (var w in words)
+                    set.Add(w);
+            }
+
+            // Step 2 — augment with natural language synonyms that node data
+            // can never contain: verbs, adjectives, colloquial phrases.
+            // This is the only part that ever needs manual maintenance,
+            // and it's small because the nouns come from your data automatically.
+            var augments = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Recency"] = new[] { "came", "come", "back", "returned", "haven", "since", "often", "active", "inactive" },
+                ["Visits"] = new[] { "come", "came", "often", "times", "many", "repeat", "regular", "multiple" },
+                ["Loyalty"] = new[] { "often", "come", "win", "lost", "churned", "dormant", "retention", "tier" },
+                ["Spend"] = new[] { "bought", "buy", "money", "over", "under", "more", "less", "budget", "£", "pound" },
+                ["Age"] = new[] { "young", "old", "born", "generation", "teen", "elderly", "youth", "older", "younger" },
+                ["Gender"] = new[] { "ladies", "gents", "boys", "girls", "sex" },
+                ["Location"] = new[] { "live", "living", "from", "based", "nearby", "local", "where" },
+                ["Dwell Time"] = new[] { "stay", "long", "quick", "fast", "slow", "browsing", "inside" },
+                ["Visit Pattern"] = new[] { "when", "typical", "usual", "peak", "off", "busy", "quiet", "lunch", "late", "early" },
+                ["Email Engagement"] = new[] { "read", "inbox", "mailing", "unsubscribed", "responded", "newsletter" },
+                ["SMS Engagement"] = new[] { "texted", "received", "delivered", "undelivered" },
+                ["Contact"] = new[] { "reach", "reachable", "opted", "communicate", "channel" },
+                ["Site"] = new[] { "shop", "usual", "interacted" },
+                ["Profile"] = new[] { "holder", "participant", "valid", "invalid", "consent" },
+                ["Transaction values"] = new[] {"spend", "spent", "spending", "lot", "much","over", "under", "money", "£", "pound", "high", "low"},
+            };
+
+            foreach (var (cat, synonyms) in augments)
+            {
+                if (!result.TryGetValue(cat, out var set))
+                {
+                    set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    result[cat] = set;
+                }
+                foreach (var s in synonyms)
+                    set.Add(s);
+            }
+
+            return result;
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        // BUILD CLARIFICATION PAYLOAD — keywords built from live catalog
+        // ════════════════════════════════════════════════════════════════════
         private async Task<List<ClarificationBlockDto>?> BuildClarificationPayloadAsync(
-    string userMessage,
-    Dictionary<int, NodeCatalogItem> catalog)
+           string userMessage,
+           Dictionary<int, NodeCatalogItem> catalog)
         {
             var words = userMessage
                 .ToLower()
                 .Split(new[] { ' ', ',', '.', '?', '!' }, StringSplitOptions.RemoveEmptyEntries)
-                .Where(w => w.Length > 2)   // skip "in", "a", "to", "of", "is"
+                .Where(w => w.Length > 2 && !ScoringStopWords.Contains(w))
                 .Distinct()
                 .ToArray();
 
             if (words.Length == 0) return null;
+
+            var categoryKeywords = BuildCategoryKeywords(catalog);
 
             var scoredParents = catalog.Values
                 .Where(n => n.ParentId > 0)
@@ -405,18 +491,24 @@ namespace crm_ai.Services
                 {
                     var semanticCategory = g.First().Category;
 
-                    // Score 1: direct word match in node SearchText.
-                    // Catches specific values: city names, ages, exact terms.
                     var searchScore = g.Sum(n =>
-                        words.Count(w => n.SearchText.Contains(w, StringComparison.OrdinalIgnoreCase)));
+                        words.Count(w =>
+                        {
+                            var text = n.SearchText;
+                            var idx = text.IndexOf(w, StringComparison.OrdinalIgnoreCase);
+                            while (idx >= 0)
+                            {
+                                var before = idx == 0 || !char.IsLetterOrDigit(text[idx - 1]);
+                                var after = idx + w.Length >= text.Length
+                                            || !char.IsLetterOrDigit(text[idx + w.Length]);
+                                if (before && after) return true;
+                                idx = text.IndexOf(w, idx + 1, StringComparison.OrdinalIgnoreCase);
+                            }
+                            return false;
+                        }));
 
-                    // Score 2: natural language → SemanticCategory keyword match.
-                    // Catches phrases like "come often", "high spenders", "weekend visitors".
-                    var categoryScore = SemanticCategoryKeywords.TryGetValue(semanticCategory, out var keywords)
-                        ? words.Count(w => keywords.Any(k =>
-                            string.Equals(k, w, StringComparison.OrdinalIgnoreCase) ||
-                            k.Contains(w, StringComparison.OrdinalIgnoreCase) ||
-                            w.Contains(k, StringComparison.OrdinalIgnoreCase)))
+                    var categoryScore = categoryKeywords.TryGetValue(semanticCategory, out var keywords)
+                        ? words.Count(w => keywords.Contains(w))
                         : 0;
 
                     return new
@@ -424,11 +516,23 @@ namespace crm_ai.Services
                         ParentId = g.Key,
                         ParentName = g.First().ParentName,
                         DataType = g.First().DataType,
+                        SemanticCategory = semanticCategory,
                         Nodes = g.OrderBy(n => n.Id).ToList(),
-                        Score = searchScore + categoryScore
+                        Score = searchScore + categoryScore,
+                        IsVague = searchScore == 0
                     };
                 })
                 .Where(g => g.Score > 0)
+                .GroupBy(g => g.SemanticCategory)
+                .SelectMany(g =>
+                {
+                    var ordered = g.OrderByDescending(x => x.Score).ToList();
+                    if (ordered.Count >= 2 &&
+                        !string.Equals(ordered[0].ParentName, ordered[1].ParentName,
+                            StringComparison.OrdinalIgnoreCase))
+                        return ordered.Take(2);
+                    return ordered.Take(1);
+                })
                 .OrderByDescending(g => g.Score)
                 .Take(4)
                 .ToList();
@@ -437,16 +541,78 @@ namespace crm_ai.Services
                 "Clarification scoring for \"{Msg}\" | {Count} groups | Top: [{Top}]",
                 userMessage,
                 scoredParents.Count,
-                string.Join(", ", scoredParents.Take(4).Select(g => $"{g.ParentName}={g.Score}")));
+                string.Join(", ", scoredParents.Take(4)
+                    .Select(g => $"{g.ParentName}={g.Score}(vague={g.IsVague})")));
 
-            if (scoredParents.Count <= 1) return null;
+            var scoredParentKeys = new HashSet<int>(scoredParents.Select(g => g.ParentId));
+            scoredParents = scoredParents
+                .Where(g => !g.Nodes.Any(n => scoredParentKeys.Contains(n.Id)))
+                .ToList();
+
+            if (scoredParents.Count == 0) return null;
+
+            // ── WORD-LEVEL AMBIGUITY CHECK ────────────────────────────────────────
+            // Only show clarification cards when a single word from the user's message
+            // scores in 2+ different parent groups simultaneously.
+            // If every word maps to exactly one group, the AI can build directly.
+            var wordToParents = new Dictionary<string, HashSet<int>>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var group in scoredParents)
+            {
+                foreach (var word in words)
+                {
+                    bool matchesGroup = group.Nodes.Any(n =>
+                    {
+                        var text = n.SearchText;
+                        var idx = text.IndexOf(word, StringComparison.OrdinalIgnoreCase);
+                        while (idx >= 0)
+                        {
+                            var before = idx == 0 || !char.IsLetterOrDigit(text[idx - 1]);
+                            var after = idx + word.Length >= text.Length
+                                        || !char.IsLetterOrDigit(text[idx + word.Length]);
+                            if (before && after) return true;
+                            idx = text.IndexOf(word, idx + 1, StringComparison.OrdinalIgnoreCase);
+                        }
+                        return false;
+                    });
+
+                    if (!matchesGroup)
+                        matchesGroup = categoryKeywords.TryGetValue(
+                            group.SemanticCategory, out var kws) && kws.Contains(word);
+
+                    if (matchesGroup)
+                    {
+                        if (!wordToParents.ContainsKey(word))
+                            wordToParents[word] = new HashSet<int>();
+                        wordToParents[word].Add(group.ParentId);
+                    }
+                }
+            }
+
+            var ambiguousParentIds = wordToParents
+                .Where(kv => kv.Value.Count > 1)
+                .SelectMany(kv => kv.Value)
+                .ToHashSet();
+
+            _logger.LogInformation(
+                "Ambiguity check: {Count} ambiguous groups — [{Groups}]",
+                ambiguousParentIds.Count,
+                string.Join(", ", scoredParents
+                    .Where(g => ambiguousParentIds.Contains(g.ParentId))
+                    .Select(g => g.ParentName)));
+
+            // No word is ambiguous — let the AI build directly, no cards needed
+            if (ambiguousParentIds.Count == 0) return null;
 
             var blocks = new List<ClarificationBlockDto>();
 
-            foreach (var group in scoredParents.Take(3))
+            foreach (var group in scoredParents
+                .Where(g => ambiguousParentIds.Contains(g.ParentId))
+                .Take(3))
             {
                 var options = group.Nodes
-                    .Take(6)
+                    .Take(12)
                     .Select((n, i) => new ClarificationOptionDto
                     {
                         OptionId = $"opt_{i}",
@@ -476,6 +642,7 @@ namespace crm_ai.Services
                 });
             }
 
+            if (blocks.Count == 0) return null;
             blocks = await RewriteClarificationLabelsAsync(userMessage, blocks);
             return blocks;
         }
@@ -487,57 +654,76 @@ namespace crm_ai.Services
         /// Output: same structure with better human-readable text
         /// </summary>
         private async Task<List<ClarificationBlockDto>> RewriteClarificationLabelsAsync(
-            string userPrompt,
-            List<ClarificationBlockDto> blocks)
+    string userPrompt,
+    List<ClarificationBlockDto> blocks)
         {
             const string system =
                 """
         You rewrite CRM filter option labels into friendly, plain-English UI text.
-        The user typed a prompt. You are shown groups of filter options the system found.
-        
-        For each block:
+        The user typed a prompt. You are shown ONE group of filter options.
+
         - Rewrite "label" as a short, clear question (max 8 words)
         - Rewrite each option's "label" as a natural phrase a non-technical user would understand
-        - Keep "nodeIds" and "isFallback" exactly as-is
-        - Keep "id" and "type" exactly as-is
+        - Keep "id", "type", "optionId", "rules", "isFallback" exactly as-is
         - Never add or remove options
-        - Return ONLY valid JSON — the same array structure, rewritten
-        
-        Examples of good rewrites:
-          "visitrecency" block label → "How recently did they visit?"
-          "<= 7 days" option → "Within the last week"
-          "15-31 days" option → "2–4 weeks ago"
-          "loyaltysegment" block label → "Or pick a loyalty tier instead?"
-          "Loyal" option → "Loyal customers"
-          "Frequent" option → "Frequent visitors"
+        - Return ONLY valid JSON — the same single block object, rewritten
+
+        Examples:
+          block label "Total transaction value" → "What total spend are you targeting?"
+          block label "Average transaction value" → "What average spend are you targeting?"
+          block label "Segment" → "Which loyalty tier?"
+          block label "Recency" → "How recently did they visit?"
+          option label "<= 7 days" → "Within the last week"
+          option label "Loyal" → "Loyal customers"
+          option label "Lapsed" → "Lapsed customers"
         """;
 
-            try
+            var result = new List<ClarificationBlockDto>();
+
+            foreach (var block in blocks)
             {
-                var blocksJson = JsonSerializer.Serialize(blocks, _camelCaseOptions);
-                var userPromptText = $"User typed: \"{userPrompt}\"\n\nBlocks to rewrite:\n{blocksJson}";
+                try
+                {
+                    var blockJson = JsonSerializer.Serialize(block, _camelCaseOptions);
+                    var userPromptText =
+                        $"User typed: \"{userPrompt}\"\n\nBlock to rewrite:\n{blockJson}";
 
-                var (responseJson, _) = await CallGroqAsync(
-                    system, userPromptText,
-                    maxTokens: 400, skipDelay: true);
+                    // Token budget for ONE block only — much smaller, never truncates
+                    int estimatedTokens = block.Options.Count * 40 + 200;
+                    estimatedTokens = Math.Clamp(estimatedTokens, 400, 800);
 
-                var cleaned = CleanJson(responseJson);
+                    var (responseJson, _) = await CallGroqAsync(
+                        system, userPromptText,
+                        maxTokens: estimatedTokens, skipDelay: true);
 
-                // The response might be an array, not an object
-                var rewritten = JsonSerializer.Deserialize<List<ClarificationBlockDto>>(
-                    cleaned, _jsonOptions);
+                    var cleaned = CleanJson(responseJson);
 
-                if (rewritten != null && rewritten.Count == blocks.Count)
-                    return rewritten;
+                    var rewritten = JsonSerializer.Deserialize<ClarificationBlockDto>(
+                        cleaned, _jsonOptions);
 
-                _logger.LogWarning("Label rewrite returned wrong count — using raw labels");
-                return blocks;
+                    if (rewritten != null && rewritten.Options?.Count == block.Options.Count)
+                    {
+                        result.Add(rewritten);
+                        _logger.LogInformation(
+                            "Label rewrite succeeded for block: {BlockId}", block.Id);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Label rewrite wrong shape for block {BlockId} — using raw",
+                            block.Id);
+                        result.Add(block);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Label rewrite failed for block {BlockId} — using raw", block.Id);
+                    result.Add(block);
+                }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Label rewrite failed — using raw labels");
-                return blocks; // raw labels are still usable
-            }
+
+            return result;
         }
         // ════════════════════════════════════════════════════════════════════
         // JSON PARSING — CHANGED: handles bare group response + wrapped response
@@ -735,6 +921,32 @@ namespace crm_ai.Services
                 if (request.IntentConfirmed == true)
                 {
                     bool isFirstBuild = request.CurrentRootGroup == null || CountRules(request.CurrentRootGroup) == 0;
+
+                    if (!isFirstBuild)
+                    {
+                        var intentMsg = FindEffectiveUserRequest(request.Messages);
+                        var intentCatalog = await BuildNodeCatalogAsync();
+                        var intentClarifications = await BuildClarificationPayloadAsync(intentMsg, intentCatalog);
+
+                        if (intentClarifications != null && intentClarifications.Count > 0)
+                        {
+                            var stateId = SaveClarificationState(intentClarifications);
+                            _logger.LogInformation(
+                                "Clarification intercepted before refine build for: \"{Msg}\"", intentMsg);
+
+                            return new ConversationResponseDto
+                            {
+                                Status = "clarifying_structured",
+                                Message = $"Before I apply that, I need a bit more detail:",
+                                Questions = new(),
+                                Clarifications = intentClarifications,
+                                ClarificationStateId = stateId,
+                                Selection = null,
+                                TokensUsed = 0
+                            };
+                        }
+                    }
+
                     _logger.LogInformation("IntentConfirmed → build (isFirstBuild={IsFirst})", isFirstBuild);
                     return await HandleBuildOrRefineAsync(
                         request.Messages, request.CurrentRootGroup,
@@ -776,11 +988,41 @@ namespace crm_ai.Services
                 bool hasRules = request.CurrentRootGroup != null && CountRules(request.CurrentRootGroup) > 0;
                 if (hasRules)
                 {
-                    _logger.LogInformation("Refine turn — showing intent confirmation");
-                    var currentRulesDesc = DescribeGroup(request.CurrentRootGroup!, catalog);
-                    return await HandleIntentConfirmationAsync(
-                        request.Messages, existingRulesContext, 0,
-                        isRefine: true, currentRulesDesc: currentRulesDesc);
+                    // ← ADD THIS — if user already answered clarification cards, skip to processing
+                    bool hasClarificationAnswers =
+                        !string.IsNullOrWhiteSpace(request.ClarificationStateId) &&
+                        request.ClarificationAnswers != null &&
+                        request.ClarificationAnswers.Count > 0;
+
+                    if (!hasClarificationAnswers)  // ← wrap everything inside this
+                    {
+                        var lastMsg = request.Messages.LastOrDefault(m => m.Role == "user")?.Content ?? "";
+                        var refineCheckCatalog = await BuildNodeCatalogAsync();
+
+                        var clarifications = await BuildClarificationPayloadAsync(lastMsg, refineCheckCatalog);
+                        if (clarifications != null && clarifications.Count > 0)
+                        {
+                            var stateId = SaveClarificationState(clarifications);
+                            _logger.LogInformation("Clarification triggered mid-refine for: \"{Msg}\"", lastMsg);
+                            return new ConversationResponseDto
+                            {
+                                Status = "clarifying_structured",
+                                Message = $"I found a few possible meanings for '{lastMsg}'. Pick the ones that apply:",
+                                Questions = new(),
+                                Clarifications = clarifications,
+                                ClarificationStateId = stateId,
+                                Selection = null,
+                                TokensUsed = 0
+                            };
+                        }
+
+                        _logger.LogInformation("Refine turn — showing intent confirmation");
+                        var currentRulesDesc = DescribeGroup(request.CurrentRootGroup!, refineCheckCatalog);
+                        return await HandleIntentConfirmationAsync(
+                            request.Messages, existingRulesContext, 0,
+                            isRefine: true, currentRulesDesc: currentRulesDesc);
+                    }
+                    // has clarification answers → fall through to answer processing below
                 }
                 // ── HANDLE STRUCTURED CLARIFICATION ANSWERS ───────────────────────────
                 if (!string.IsNullOrWhiteSpace(request.ClarificationStateId) &&
@@ -830,7 +1072,7 @@ namespace crm_ai.Services
                         })
                         .ToList();
 
-                    var builtGroup = BuildGroupFromResolvedAnswers(clarificationAnswerDtos);
+                    var builtGroup = SelectionGroupBuilder.BuildGroupFromResolvedAnswers(clarificationAnswerDtos);
                     NormalizeGroup(builtGroup);
 
                     var mergedRoot = request.CurrentRootGroup != null && CountRules(request.CurrentRootGroup) > 0
@@ -1215,40 +1457,72 @@ namespace crm_ai.Services
         // BUILD NEW GROUP
         // ════════════════════════════════════════════════════════════════════
 
+        // ════════════════════════════════════════════════════════════════════
+        // BUILD ID HINTS — derives mappings from live catalog, no hardcoded IDs
+        // ════════════════════════════════════════════════════════════════════
+        private static string BuildIdHints(Dictionary<int, NodeCatalogItem> catalog)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("CRITICAL ID MAPPINGS (from live catalog — use these exact IDs):");
+
+            var hintCategories = new[]
+            {
+        "Recency", "Visits", "Loyalty", "Spend",
+        "Age", "Gender", "Location", "Dwell Time",
+        "Visit Pattern", "Contact", "Site",
+        "Email Engagement", "SMS Engagement", "Profile"
+    };
+
+            foreach (var cat in hintCategories)
+            {
+                var nodes = catalog.Values
+                    .Where(n => n.Category == cat)
+                    .OrderBy(n => n.Id)
+                    .Take(12)
+                    .ToList();
+
+                if (nodes.Count == 0) continue;
+
+                sb.Append($"{cat}: ");
+                sb.AppendLine(string.Join(", ", nodes.Select(n => $"'{n.NodeName}'={n.Id}")));
+            }
+
+            return sb.ToString();
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        // BUILD NEW GROUP — IDs derived from catalog, never hardcoded
+        // ════════════════════════════════════════════════════════════════════
         private async Task<(SelectionGroupDto? Group, int Tokens)> BuildNewGroupAsync(
             string userMessage, Dictionary<int, NodeCatalogItem> catalog)
         {
-            const string newGroupSystem =
-                """
-                You are a CRM rule group builder.
-                Generate a SINGLE rule group JSON object for the described audience.
-                Use ONLY the IDs provided in the catalog.
-                logicalOperator must be "AND", "OR", or "EXCLUDE".
-                operator is always "=" and value is always "".
-                Return ONLY valid JSON — no markdown, no preamble, no rootGroup wrapper.
+            var idHints = BuildIdHints(catalog);
 
-                CRITICAL TIME MAPPING:
-                - "last week" / "within 7 days" = ID 5350
-                - "last month" / "last 30 days" = ID 5352
-                - "last 2 months" = ID 5353
+            var newGroupSystem =
+                $$"""
+            You are a CRM rule group builder.
+            Generate a SINGLE rule group JSON object for the described audience.
+            Use ONLY the IDs listed below — do not invent IDs.
+            logicalOperator must be "AND", "OR", or "EXCLUDE".
+            operator is always "=" and value is always "".
+            Return ONLY valid JSON — no markdown, no preamble, no rootGroup wrapper.
 
-                CRITICAL AGE MAPPING:
-                - "18-24"=4, "25-34"=5, "35-44"=6, "45-54"=7, "55-64"=8, "65+"=9
-                - Ranges → OR sub-group with each matching ID
+            {{idHints}}
 
-                CRITICAL SPEND MAPPING:
-                - "over £X" = OR sub-group of ALL spend-range IDs above X
-                - "total visits over X" → find the visit-count node above X
+            RULES:
+            - Return ONE flat AND group containing ALL conditions in its "rules" array
+            - Only create a sub-group when you genuinely need OR logic
+              (e.g. multiple age ranges, multiple cities for the SAME condition)
+            - NEVER wrap the result in an outer OR or AND shell — return the group directly
+            - Date/recency: use the most specific matching recency ID
+            - Age ranges: OR sub-group with each matching age ID
+            - "over £X" spend: OR sub-group of ALL spend IDs above X
 
-                CRITICAL LOYALTY:
-                - "loyal"=5503, "frequent"=5504, "lapsed"=5507, "long-term lapsed"=5508
+            OUTPUT FORMAT — return ONLY this shape:
+            {"logicalOperator":"AND","rules":[{"treeNodeId":123,"operator":"=","value":""},{"treeNodeId":456,"operator":"=","value":""}],"groups":[]}
 
-                OUTPUT FORMAT — return ONLY this shape:
-                {"logicalOperator":"AND","rules":[{"treeNodeId":123,"operator":"=","value":""}],"groups":[]}
-
-                If multiple conditions, nest OR sub-groups inside the AND group as needed.
-                NEVER wrap in a rootGroup. Return only the group object.
-                """;
+            NEVER wrap in a rootGroup or any outer group. Return only the single group object.
+            """;
 
             try
             {
@@ -1264,11 +1538,18 @@ namespace crm_ai.Services
                 var cleaned = CleanJson(rawJson);
                 var parsed = JsonSerializer.Deserialize<JsonObject>(cleaned, _jsonOptions);
 
-                // Unwrap rootGroup if the model added it anyway
                 JsonNode? groupNode = parsed?["rootGroup"] ?? parsed?["RootGroup"];
                 string groupJson = groupNode != null ? groupNode.ToJsonString() : cleaned;
 
-                var group = JsonSerializer.Deserialize<SelectionGroupDto>(groupJson, _jsonOptions);
+                var raw = JsonSerializer.Deserialize<SelectionGroupDto>(groupJson, _jsonOptions);
+
+                // Unwrap any spurious wrapper the AI may have added
+                var group = UnwrapToMeaningfulGroup(raw);
+
+                _logger.LogInformation(
+                    "BuildNewGroupAsync parsed: operator={Op}, rules={RuleCount}, groups={GroupCount}",
+                    group?.LogicalOperator, group?.Rules?.Count ?? 0, group?.Groups?.Count ?? 0);
+
                 if (group != null) NormalizeGroup(group);
                 return (group, tokens);
             }
@@ -1294,6 +1575,7 @@ namespace crm_ai.Services
 
             // ── CHANGED: compute confidence deterministically ─────────────────
             var catalog = await BuildNodeCatalogAsync();
+            rootGroup = SelectionSanitizer.Sanitize(rootGroup, catalog, _logger);
             var (confidence, confidenceReasons) = ComputeRuleBasedConfidence(rootGroup, catalog);
 
             _logger.LogInformation(
@@ -1435,89 +1717,112 @@ namespace crm_ai.Services
             bool skipDelay = false,
             string? model = null)
         {
-            const int maxRetries = 3;
             var effectiveModel = model ?? _options.Model;
 
-            for (int attempt = 0; attempt < maxRetries; attempt++)
+            if (!skipDelay)
+                await Task.Delay(500);
+
+            var request = new GrokRequest
             {
-                if (!skipDelay)
-                    await Task.Delay(500);
+                Model = effectiveModel,
+                Temperature = 0.1f,
+                MaxTokens = maxTokens,
+                Messages = new List<GrokMessage>
+        {
+            new() { Role = "system", Content = systemPrompt },
+            new() { Role = "user",   Content = userPrompt }
+        }
+            };
 
-                var request = new GrokRequest
-                {
-                    Model = effectiveModel,
-                    Temperature = 0.1f,
-                    MaxTokens = maxTokens,
-                    Messages = new List<GrokMessage>
-                    {
-                        new() { Role = "system", Content = systemPrompt },
-                        new() { Role = "user",   Content = userPrompt   }
-                    }
-                };
+            var content = new StringContent(
+                JsonSerializer.Serialize(request),
+                Encoding.UTF8,
+                "application/json");
 
-                var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
-
-                HttpResponseMessage httpResponse;
-                try
-                {
-                    httpResponse = await _httpClient.PostAsync("https://api.groq.com/openai/v1/chat/completions", content);
-                }
-                catch (Exception ex)
-                {
-                    if (attempt < maxRetries - 1)
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)));
-                        continue;
-                    }
-                    throw new InvalidOperationException("AI service is currently unavailable.", ex);
-                }
-
-                var statusCode = (int)httpResponse.StatusCode;
-
-                if (statusCode == 429 && attempt < maxRetries - 1)
-                {
-                    _logger.LogWarning("Groq 429 on attempt {Attempt} — backing off", attempt + 1);
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Pow(2, attempt + 1)));
-                    continue;
-                }
-
-                if ((statusCode == 413 || statusCode == 404) && effectiveModel != _options.Model)
-                {
-                    var errorBody = await httpResponse.Content.ReadAsStringAsync();
-                    _logger.LogWarning("HTTP {Status} on '{Model}' — falling back to '{Fast}'. Detail: {Body}",
-                        statusCode, effectiveModel, _options.Model, errorBody);
-                    return await CallGroqAsync(systemPrompt, userPrompt, maxTokens, skipDelay, _options.Model);
-                }
-
-                if (!httpResponse.IsSuccessStatusCode)
-                {
-                    var errorBody = await httpResponse.Content.ReadAsStringAsync();
-                    _logger.LogError("Groq API error {Status}: {Body}", httpResponse.StatusCode, errorBody);
-                    throw new InvalidOperationException($"AI service returned {httpResponse.StatusCode}. Detail: {errorBody}");
-                }
-
-                var responseJson = await httpResponse.Content.ReadAsStringAsync();
-                var grokResponse = JsonSerializer.Deserialize<GrokResponse>(responseJson);
-
-                var firstChoice = grokResponse?.Choices?.FirstOrDefault();
-                var responseText = firstChoice?.Message?.Content?.Trim() ?? "";
-                var tokensUsed = grokResponse?.Usage?.TotalTokens ?? 0;
-
-                if (firstChoice?.FinishReason == "length" && effectiveModel != _options.Model)
-                {
-                    _logger.LogWarning("finish_reason=length on '{Model}' — retrying with '{Fast}'", effectiveModel, _options.Model);
-                    return await CallGroqAsync(systemPrompt, userPrompt, maxTokens, skipDelay, _options.Model);
-                }
-
-                _logger.LogInformation("Groq call complete ({Tokens} tokens, model={Model}, attempt={Attempt})",
-                    tokensUsed, effectiveModel, attempt + 1);
-                _logger.LogInformation("BILLING | Model={Model} | Tokens={Tokens} | MaxTokens={MaxTokens}",
-                    effectiveModel, tokensUsed, maxTokens);
-
-                return (responseText, tokensUsed);
+            HttpResponseMessage httpResponse;
+            try
+            {
+                httpResponse = await _httpClient.PostAsync(
+                    "https://api.groq.com/openai/v1/chat/completions", content);
+            }
+            catch (Polly.CircuitBreaker.BrokenCircuitException ex)
+            {
+                _logger.LogWarning("Groq circuit open — failing fast");
+                throw new InvalidOperationException(
+                    "The AI service is temporarily unavailable. " +
+                    "Please use the visual builder or try again in 30 seconds.", ex);
+            }
+            catch (Polly.Timeout.TimeoutRejectedException ex)
+            {
+                _logger.LogWarning("Groq request timed out");
+                throw new InvalidOperationException(
+                    "The AI service took too long to respond. Please try again.", ex);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Groq HTTP call failed");
+                _usageService.Record(
+                    model: effectiveModel,
+                    feature: "groq_call",
+                    tokensUsed: 0,
+                    maxTokens: maxTokens,
+                    success: false,
+                    errorMessage: ex.Message);
+                throw new InvalidOperationException(
+                    "AI service is currently unavailable.", ex);
             }
 
-            throw new InvalidOperationException("AI service unavailable after retries.");
+            if ((int)httpResponse.StatusCode == 413 || (int)httpResponse.StatusCode == 404)
+            {
+                if (effectiveModel != _options.Model)
+                {
+                    _logger.LogWarning(
+                        "HTTP {Status} on '{Model}' — falling back to '{Fast}'",
+                        httpResponse.StatusCode, effectiveModel, _options.Model);
+                    return await CallGroqAsync(
+                        systemPrompt, userPrompt, maxTokens, skipDelay, _options.Model);
+                }
+            }
+
+            if (!httpResponse.IsSuccessStatusCode)
+            {
+                var errorBody = await httpResponse.Content.ReadAsStringAsync();
+                _logger.LogError("Groq API error {Status}: {Body}",
+                    httpResponse.StatusCode, errorBody);
+                throw new InvalidOperationException(
+                    $"AI service returned {httpResponse.StatusCode}.");
+            }
+
+            var responseJson = await httpResponse.Content.ReadAsStringAsync();
+            var grokResponse = JsonSerializer.Deserialize<GrokResponse>(responseJson);
+
+            var firstChoice = grokResponse?.Choices?.FirstOrDefault();
+            var responseText = firstChoice?.Message?.Content?.Trim() ?? "";
+            var tokensUsed = grokResponse?.Usage?.TotalTokens ?? 0;
+
+            if (firstChoice?.FinishReason == "length" && effectiveModel != _options.Model)
+            {
+                _logger.LogWarning(
+                    "finish_reason=length on '{Model}' — retrying with '{Fast}'",
+                    effectiveModel, _options.Model);
+                return await CallGroqAsync(
+                    systemPrompt, userPrompt, maxTokens, skipDelay, _options.Model);
+            }
+
+            _logger.LogInformation(
+                "Groq call complete ({Tokens} tokens, model={Model})",
+                tokensUsed, effectiveModel);
+            _logger.LogInformation(
+                "BILLING | Model={Model} | Tokens={Tokens} | MaxTokens={MaxTokens}",
+                effectiveModel, tokensUsed, maxTokens);
+            _usageService.Record(
+                model: effectiveModel,
+                feature: "groq_call",
+                tokensUsed: tokensUsed,
+                maxTokens: maxTokens,
+                success: true);
+
+            return (responseText, tokensUsed);
         }
 
         // ════════════════════════════════════════════════════════════════════
@@ -1591,7 +1896,7 @@ namespace crm_ai.Services
         // CONFIDENCE SCORING — Deterministic rule-based engine
         // ════════════════════════════════════════════════════════════════════
 
-        private static (int Score, string[] Reasons) ComputeRuleBasedConfidence(
+        internal static (int Score, string[] Reasons) ComputeRuleBasedConfidence(
             SelectionGroupDto rootGroup,
             Dictionary<int, NodeCatalogItem> catalog)
         {
@@ -1749,6 +2054,12 @@ namespace crm_ai.Services
             return Task.FromResult((score, 0)); // 0 tokens — no Groq call
         }
 
+        public async Task<(string Response, int TokensUsed)> CallPublicAsync(
+            string systemPrompt, string userPrompt, int maxTokens = 200)
+        {
+            return await CallGroqAsync(systemPrompt, userPrompt, maxTokens, skipDelay: true);
+        }
+
         // ════════════════════════════════════════════════════════════════════
         // HELPERS
         // ════════════════════════════════════════════════════════════════════
@@ -1808,126 +2119,48 @@ namespace crm_ai.Services
             _cache.TryGetValue(ClarificationCachePrefix + id, out ClarificationState? state);
             return state;
         }
+        // ADD this static field near MultiSelectDataTypes
+        private static readonly HashSet<string> ScoringStopWords = new(StringComparer.OrdinalIgnoreCase)
+        {
+            // Generic domain words
+            "customers", "customer", "people", "person", "users", "user",
+            "audience", "members", "member", "visitors", "visitor",
+            // Common English function words
+            "who", "that", "which", "the", "and", "but", "for", "with",
+            "has", "have", "are", "were", "they", "their", "them",
+            "all", "any", "some", "can", "not", "get", "want", "need",
+            "find", "show", "give", "our", "been", "this", "from",
+            // ← ADD THESE: comparison words that appear in node names
+            "than", "more", "less", "over", "under", "above", "below",
+            "older", "younger", "bigger", "smaller", "higher", "lower",
+            "regularly", "regular", "typical", "usually", "usual", "often", "frequent"
+        };
         private static readonly HashSet<string> MultiSelectDataTypes = new(StringComparer.OrdinalIgnoreCase)
         {
             "agerange", "cityregion", "string", "dayofweek", "hourofday", "notnull", "siteid"
             };
+        private static SelectionGroupDto UnwrapToMeaningfulGroup(SelectionGroupDto? group)
+        {
+            if (group == null) return EmptyGroup();
+
+            // This group has rules — it IS the meaningful group
+            if (group.Rules?.Count > 0) return group;
+
+            // Empty wrapper with exactly one sub-group — unwrap and recurse
+            if ((group.Rules == null || group.Rules.Count == 0)
+                && group.Groups?.Count == 1)
+            {
+                return UnwrapToMeaningfulGroup(group.Groups[0]);
+            }
+
+            // Has sub-groups but also no rules and more than one child —
+            // probably a legitimate multi-group structure, return as-is
+            return group;
+        }
         // ════════════════════════════════════════════════════════════════════
         // SEMANTIC CATEGORY KEYWORDS — bridges natural language to categories
         // Only needs updating if you add a new SemanticCategory to the tree
         // ════════════════════════════════════════════════════════════════════
-        private static readonly Dictionary<string, string[]> SemanticCategoryKeywords =
-            new(StringComparer.OrdinalIgnoreCase)
-            {
-                ["Age"] = new[]
-            {
-        "age", "old", "young", "years", "born", "generation",
-        "teenager", "teen", "millennial", "senior", "elderly",
-        "adult", "youth", "older", "younger",
-        "18", "25", "35", "45", "55", "65"
-            },
-
-                ["Gender"] = new[]
-            {
-        "gender", "male", "female", "men", "women", "man",
-        "woman", "ladies", "gents", "boys", "girls", "sex"
-            },
-
-                ["Location"] = new[]
-            {
-        "location", "city", "region", "area", "where", "local",
-        "london", "manchester", "birmingham", "edinburgh", "glasgow",
-        "bristol", "leeds", "liverpool", "sheffield", "cardiff",
-        "belfast", "scotland", "wales", "north", "south", "east",
-        "west", "midlands", "uk", "england", "ireland", "nearby",
-        "postcode", "town", "live", "living", "from", "based"
-            },
-
-                ["Recency"] = new[]
-            {
-        "recent", "recently", "last", "visit", "visited", "came",
-        "come", "ago", "days", "week", "month", "yesterday",
-        "today", "often", "back", "returned", "since", "within",
-        "new", "haven"
-            },
-
-                ["Visits"] = new[]
-            {
-        "visit", "visits", "visited", "come", "came", "times",
-        "often", "frequently", "count", "number", "many",
-        "multiple", "once", "twice", "location", "stores",
-        "sites", "places", "regular", "repeat"
-            },
-
-                ["Loyalty"] = new[]
-            {
-        "loyal", "loyalty", "frequent", "occasional", "infrequent",
-        "lapsed", "inactive", "churned", "returning", "regular",
-        "dormant", "engaged", "tier", "segment", "status",
-        "vip", "often", "come", "never", "lost", "retention",
-        "win", "back"
-            },
-
-                ["Spend"] = new[]
-            {
-        "spend", "spent", "spending", "value", "transaction",
-        "purchase", "purchased", "bought", "buy", "money",
-        "average", "total", "high", "low", "expensive", "cheap",
-        "over", "under", "more", "less", "basket", "order",
-        "revenue", "sales", "£", "pound", "pounds"
-            },
-
-                ["Dwell Time"] = new[]
-            {
-        "dwell", "stay", "time", "duration", "minutes", "hours",
-        "long", "quick", "fast", "slow", "browse", "browsing",
-        "store"
-            },
-
-                ["Visit Pattern"] = new[]
-            {
-        "day", "time", "when", "pattern", "typical", "usual",
-        "morning", "afternoon", "evening", "night", "weekend",
-        "weekday", "monday", "tuesday", "wednesday", "thursday",
-        "friday", "saturday", "sunday", "midday", "lunch",
-        "late", "early", "peak", "hour"
-            },
-
-                ["Email Engagement"] = new[]
-            {
-        "email", "emails", "open", "opened", "click", "clicked",
-        "engaged", "engagement", "gmail", "hotmail", "yahoo",
-        "outlook", "domain", "newsletter", "campaign",
-        "read", "unsubscribed", "inbox", "mailing"
-            },
-
-                ["SMS Engagement"] = new[]
-            {
-        "sms", "text", "texted", "message", "messages", "mobile",
-        "phone", "delivered", "undelivered", "received"
-            },
-
-                ["Contact"] = new[]
-            {
-        "contact", "contactable", "reachable", "emailable",
-        "email", "phone", "sms", "mail", "post", "opted",
-        "consent", "available", "mailable", "phoneable",
-        "channel", "communicate", "reach"
-            },
-
-                ["Site"] = new[]
-            {
-        "site", "store", "shop", "branch", "location", "venue",
-        "favourite", "preferred", "home", "usual", "interacted",
-        "visited"
-            },
-
-                ["Profile"] = new[]
-            {
-        "survey", "gift", "card", "voucher", "name", "valid",
-        "invalid", "profile", "participant", "holder", "consent"
-            },
-            };
 
         private static string GetInteractionType(string dataType) =>
             MultiSelectDataTypes.Contains(dataType) ? "multi_choice" : "single_choice";
@@ -2164,54 +2397,8 @@ namespace crm_ai.Services
             var catalog = await BuildNodeCatalogAsync();
             return await ScoreConfidenceAsync(intent, rootGroup, catalog);
         }
-        private sealed class ResolvedClarificationAnswer
-        {
-            public string BlockId { get; set; } = "";
-            public List<ClarificationRuleDto> ResolvedRules { get; set; } = new();
-        }
 
-        private static SelectionGroupDto BuildGroupFromResolvedAnswers(
-            List<ResolvedClarificationAnswer> answers)
-        {
-            var meaningful = answers.Where(a => a.ResolvedRules.Count > 0).ToList();
-
-            if (meaningful.Count == 0) return EmptyGroup();
-
-            if (meaningful.Count == 1 && meaningful[0].ResolvedRules.Count == 1)
-            {
-                var r = meaningful[0].ResolvedRules[0];
-                return new SelectionGroupDto
-                {
-                    LogicalOperator = "AND",
-                    Rules = new() { new() { TreeNodeId = r.TreeNodeId, Operator = r.Operator, Value = r.Value } },
-                    Groups = new()
-                };
-            }
-
-            if (meaningful.Count == 1)
-                return new SelectionGroupDto
-                {
-                    LogicalOperator = "OR",
-                    Rules = meaningful[0].ResolvedRules.Select(r =>
-                        new SelectionRuleDto { TreeNodeId = r.TreeNodeId, Operator = r.Operator, Value = r.Value }
-                    ).ToList(),
-                    Groups = new()
-                };
-
-            return new SelectionGroupDto
-            {
-                LogicalOperator = "AND",
-                Rules = new(),
-                Groups = meaningful.Select(a => new SelectionGroupDto
-                {
-                    LogicalOperator = a.ResolvedRules.Count == 1 ? "AND" : "OR",
-                    Rules = a.ResolvedRules.Select(r =>
-                        new SelectionRuleDto { TreeNodeId = r.TreeNodeId, Operator = r.Operator, Value = r.Value }
-                    ).ToList(),
-                    Groups = new()
-                }).ToList()
-            };
-        }
+    
         /// <summary>
         /// Appends a new group as a sub-group of the existing root.
         /// The root's existing rules and groups are preserved exactly.

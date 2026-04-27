@@ -39,5 +39,7 @@ namespace crm_ai.Services.Interfaces
         Task<AiDescriptionResponseDto> GenerateDescriptionOnDemandAsync(SelectionGroupDto rootGroup);
         Task<string> GenerateNameOnDemandAsync(string description);
         Task<(int Score, int Tokens)> ScoreConfidenceOnDemandAsync(string intent, SelectionGroupDto rootGroup);
+        Task<(string Response, int TokensUsed)> CallPublicAsync(
+            string systemPrompt, string userPrompt, int maxTokens = 200);
     }
 }

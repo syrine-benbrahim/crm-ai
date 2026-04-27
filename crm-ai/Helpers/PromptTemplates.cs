@@ -1,4 +1,6 @@
-﻿namespace crm_ai.Helpers
+﻿using crm_ai.DTOs;
+
+namespace crm_ai.Helpers
 {
     // ════════════════════════════════════════════════════════════════════════
     // PROMPT TEMPLATES
@@ -71,6 +73,11 @@
                 - "last month" or "last 30 days" or "past month" = ID 5352 (15-31 days).
                 - "last 2 months" = ID 5353 (1-2 months).
                 - "last 3 months" = ID 5354 (2-3 months).
+                - "last year" or "last 12 months" or "in the past year" or "over the past year" = 
+                  DO NOT add any recency filter. The visit count nodes (e.g. "3 visits", "5 visits")
+                  already count visits within the last 12 months by definition. Adding a recency
+                  filter alongside a visit count filter for "last year" is redundant and wrong.
+                  Use ONLY the visit count nodes in an OR group.
  
                 CRITICAL SPEND MAPPING RULES:
                 - "over £X" or "more than £X" or "above £X" or "spent over £X" means ALL spend
@@ -183,8 +190,11 @@
                 User: "Female customers in London aged 25-34 who visited last week, excluding lapsed"
                 Output:
                 {"rootGroup":{"logicalOperator":"AND","rules":[{"treeNodeId":14,"operator":"=","value":""},{"treeNodeId":5221,"operator":"=","value":""},{"treeNodeId":5350,"operator":"=","value":""},{"treeNodeId":5,"operator":"=","value":""}],"groups":[{"logicalOperator":"EXCLUDE","rules":[{"treeNodeId":5507,"operator":"=","value":""}],"groups":[]}]}}
- 
                 EXAMPLE 10:
+                User: "Customers aged 25 to 44 who are loyal or frequent visitors"
+                Output:
+                {"rootGroup":{"logicalOperator":"AND","rules":[],"groups":[{"logicalOperator":"OR","rules":[{"treeNodeId":5,"operator":"=","value":""},{"treeNodeId":6,"operator":"=","value":""}],"groups":[]},{"logicalOperator":"OR","rules":[{"treeNodeId":5503,"operator":"=","value":""},{"treeNodeId":5504,"operator":"=","value":""}],"groups":[]}]}}
+                EXAMPLE 11:
                 User: CURRENT RULES:
                 [AND]
                   • Contact: Emailable
@@ -194,7 +204,7 @@
                 USER WANTS TO CHANGE: "or another group where male who are aged over 65"
                 Output:
                 {"rootGroup":{"logicalOperator":"AND","rules":[{"treeNodeId":182,"operator":"=","value":""},{"treeNodeId":5350,"operator":"=","value":""}],"groups":[{"logicalOperator":"AND","rules":[{"treeNodeId":14,"operator":"=","value":""}],"groups":[]},{"logicalOperator":"AND","rules":[{"treeNodeId":13,"operator":"=","value":""},{"treeNodeId":9,"operator":"=","value":""}],"groups":[]}]}}
-                EXAMPLE 11:
+                EXAMPLE 12:
                 User: CURRENT RULES JSON:
                 {"rootGroup":{"logicalOperator":"AND","rules":[],"groups":[{"logicalOperator":"AND","rules":[{"treeNodeId":14,"operator":"=","value":""},{"treeNodeId":5350,"operator":"=","value":""}],"groups":[]},{"logicalOperator":"AND","rules":[{"treeNodeId":13,"operator":"=","value":""}],"groups":[]},{"logicalOperator":"EXCLUDE","rules":[{"treeNodeId":5371,"operator":"=","value":""}],"groups":[]}]}}
                 USER WANTS TO CHANGE: "in the group of males add location london"
@@ -299,6 +309,8 @@
     - "last month" / "last 30 days" = ID 5352
     - "last 2 months" = ID 5353
     - "last 3 months" = ID 5354
+    - "last year" / "last 12 months" / "past year" = DO NOT add recency filter.
+      Visit count nodes already count within last 12 months. Use visit count nodes only.
 
     CRITICAL AGE MAPPING:
     - "under 18" = ID 5467
@@ -547,6 +559,119 @@
                 $"USER'S INTENTION: \"{intent}\"\n\n" +
                 $"ACTUAL RULES BUILT:\n{readableRules}\n\n" +
                 $"Analyse and return the JSON result.";
+        }
+
+        // ────────────────────────────────────────────────────────────────────
+        // CAMPAIGN — extraction, confirmation, next question
+        // ────────────────────────────────────────────────────────────────────
+        public static class Campaign
+        {
+            /// <summary>
+            /// Extracts all campaign fields from a single user message in one call.
+            /// Returns only what was found — null for anything not mentioned.
+            /// </summary>
+            public const string ExtractionSystem = """
+            You are a CRM campaign assistant.
+            Extract campaign details from the user message.
+            Return ONLY a JSON object — null for any field not clearly mentioned.
+
+            FIELD RULES:
+
+            name:
+            - If the user mentions a festival, holiday, event, or season → that becomes the campaign name
+            - Examples: "eid campaign" → "Eid Campaign", "christmas offer" → "Christmas Offer Campaign",
+              "summer sale" → "Summer Sale Campaign", "ramadan" → "Ramadan Campaign"
+            - If the user gives an explicit name like "call it X" or "name it X" → use that
+            - Otherwise null
+
+            objective:
+            - A plain-English summary of what the campaign is trying to achieve
+            - If the user mentions a target audience like "loyal customers", "lapsed customers",
+              "new customers", "VIP customers" → objective = "Target [audience] with a special offer"
+            - Examples:
+              "loyal customers" → "Engage loyal customers with an exclusive offer"
+              "win back lapsed customers" → "Re-engage lapsed customers"
+              "new customers" → "Welcome new customers"
+              "high spenders" → "Reward high-spending customers"
+              "promote our eid collection" → "Promote Eid collection to customers"
+              "announce new menu" → "Announce new menu launch"
+            - If no objective or audience is stated, return null
+
+            channel:
+            - ONLY "Email" or "SMS" — never anything else
+            - "email / newsletter / html / template / inbox" → "Email"
+            - "text / sms / message / mobile / whatsapp" → "SMS"
+            - If not mentioned → null
+
+            IMPORTANT:
+            - A single message can contain name + objective + channel simultaneously
+            - "eid email campaign for loyal customers" →
+              name: "Eid Campaign", channel: "Email", objective: "Engage loyal customers for Eid"
+            - "christmas sms to win back lapsed customers" →
+              name: "Christmas Campaign", channel: "SMS", objective: "Re-engage lapsed customers"
+
+            Return ONLY this JSON shape, nothing else:
+            {
+              "name": "string or null",
+              "objective": "string or null",
+              "channel": "Email or SMS or null"
+            }
+            """;
+
+            public static string ExtractionUser(string message) =>
+                $"User message: \"{message}\"";
+
+            /// <summary>
+            /// Generates the next clarifying question based on what is still missing.
+            /// Always asks ONE question — the most important missing field.
+            /// </summary>
+            public const string NextQuestionSystem = """
+                You are a friendly CRM campaign creation assistant.
+                The user is creating a marketing campaign.
+                You have already collected some information (shown below).
+                Ask ONE short, friendly question to collect the most important missing field.
+
+                PRIORITY ORDER (ask in this order if missing):
+                1. channel — "Will this be an Email campaign or SMS?"
+                2. objective — Ask based on what we already know:
+                   - If we have a name like "Eid Campaign" → "What is the main goal of your Eid campaign — 
+                     promoting offers, rewarding loyal customers, or something else?"
+                   - If no name → "What is the main goal of this campaign?"
+                3. name — "What would you like to call this campaign?"
+
+                RULES:
+                - Ask only ONE question
+                - Reference what you already know to show context
+                  Example: "Now that we have the channel as Email, what is the main goal of this campaign?"
+                - If you already have a name, reference it: "What is the goal of your [name] campaign?"
+                - Maximum 2 sentences
+                - Be warm and conversational
+
+                Return ONLY a JSON object:
+                {"question": "Your question here."}
+                """;
+
+            public static string NextQuestionUser(
+                CampaignDraftDto draft, List<string> missing) =>
+                $"Already collected:\n" +
+                $"- Name: {draft.Name ?? "not yet provided"}\n" +
+                $"- Objective: {draft.Objective ?? "not yet provided"}\n" +
+                $"- Channel: {draft.Channel ?? "not yet provided"}\n\n" +
+                $"Still missing: {string.Join(", ", missing)}\n\n" +
+                $"Ask for the most important missing field:";
+
+            /// <summary>
+            /// Builds a confirmation summary before saving.
+            /// </summary>
+            public static string ConfirmationMessage(CampaignDraftDto draft) =>
+                $"Here's what I have for your campaign:\n\n" +
+                $"📋 **Name:** {draft.Name}\n" +
+                $"🎯 **Objective:** {draft.Objective}\n" +
+                $"📣 **Channel:** {draft.Channel}\n" +
+                (draft.SelectionName != null
+                    ? $"👥 **Audience:** {draft.SelectionName}\n"
+                    : "") +
+                $"\nShall I create this campaign?";
         }
     }
 }

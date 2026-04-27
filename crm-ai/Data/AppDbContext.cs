@@ -28,6 +28,10 @@
         public DbSet<SelectionGroup> SelectionGroups { get; set; }
         public DbSet<SelectionRule> SelectionRules { get; set; }
         public DbSet<SelectionExecution> SelectionExecutions { get; set; }
+        public DbSet<Campaign> Campaigns { get; set; }
+        public DbSet<CampaignContent> CampaignContents { get; set; }
+        public DbSet<CampaignSchedule> CampaignSchedules { get; set; }
+        public DbSet<AiUsageRecord> AiUsageRecords { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -45,7 +49,26 @@
                 .WithMany(g => g.ChildGroups)
                 .HasForeignKey(g => g.ParentGroupId)
                 .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<Campaign>()
+                .HasOne(c => c.Content)
+                .WithOne(cc => cc.Campaign)
+                .HasForeignKey<CampaignContent>(cc => cc.CampaignId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<Campaign>()
+                .HasOne(c => c.Schedule)
+                .WithOne(cs => cs.Campaign)
+                .HasForeignKey<CampaignSchedule>(cs => cs.CampaignId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<Campaign>()
+                .HasOne(c => c.Selection)
+                .WithMany()
+                .HasForeignKey(c => c.SelectionId)
+                .OnDelete(DeleteBehavior.SetNull);
         }
+
     }
 
 }
