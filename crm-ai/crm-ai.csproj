@@ -19,5 +19,8 @@
   <ItemGroup>
 	<InternalsVisibleTo Include="crm-ai.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <Folder Include="wwwroot\templates\email\" />
+  </ItemGroup>
 
 </Project>

@@ -8,13 +8,14 @@ using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
+
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
         options.JsonSerializerOptions.ReferenceHandler =
             System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
     });
-
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
@@ -72,14 +73,18 @@ builder.Services.AddHttpClient("GrokClient", (sp, client) =>
 
 // ── BLOCK 3: AI Service ──────────────────────────────────────────
 builder.Services.AddScoped<IAiService, AiService>();
-
+builder.Services.AddSingleton<IAiUsageService, AiUsageService>();
 // ── BLOCK 4: Campaign Service ─────────────────────────────────────
 builder.Services.AddScoped<ICampaignService, CampaignService>();
-
+builder.Services.AddScoped<SegmentProfileBuilder>();
+builder.Services.AddScoped<ICampaignWizardService, CampaignWizardService>();
+builder.Services.AddScoped<ITemplateRenderingService, TemplateRenderingService>();
 // Existing services
 builder.Services.AddScoped<ITreeService, TreeService>();
 builder.Services.AddScoped<ISelectionService, SelectionService>();
 builder.Services.AddScoped<ISqlBuilderService, SqlBuilderService>();
+builder.Services.AddScoped < ISelectionSuggestionService, SelectionSuggestionService>();
+builder.Services.AddScoped<ITemplateRecommendationService,TemplateRecommendationService>();
 builder.Services.AddMemoryCache();
 var app = builder.Build();
 

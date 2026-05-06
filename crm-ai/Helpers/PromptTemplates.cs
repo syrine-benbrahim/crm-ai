@@ -585,16 +585,23 @@ namespace crm_ai.Helpers
             - Otherwise null
 
             objective:
-            - A plain-English summary of what the campaign is trying to achieve
-            - If the user mentions a target audience like "loyal customers", "lapsed customers",
-              "new customers", "VIP customers" → objective = "Target [audience] with a special offer"
+            - Preserve ALL specific audience details the user mentions.
+              NEVER simplify or generalise. Keep gender, location, recency,
+              loyalty tier, age, spend exactly as stated.
+            - Format: "[action] [full audience description with all specifics]"
             - Examples:
-              "loyal customers" → "Engage loyal customers with an exclusive offer"
-              "win back lapsed customers" → "Re-engage lapsed customers"
-              "new customers" → "Welcome new customers"
-              "high spenders" → "Reward high-spending customers"
-              "promote our eid collection" → "Promote Eid collection to customers"
-              "announce new menu" → "Announce new menu launch"
+              "loyal customers"
+                → "Engage loyal customers"
+              "males who live in london and have not visited recently"
+                → "Re-engage male customers in London who haven't visited recently"
+              "win back lapsed female customers aged 25 to 44"
+                → "Win back lapsed female customers aged 25-44"
+              "high spending customers in Manchester who are frequent visitors"
+                → "Target high-spending frequent customers in Manchester"
+              "promote our eid collection"
+                → "Promote Eid collection to customers"
+              "announce new menu"
+                → "Announce new menu launch to customers"
             - If no objective or audience is stated, return null
 
             channel:
@@ -626,30 +633,38 @@ namespace crm_ai.Helpers
             /// Always asks ONE question — the most important missing field.
             /// </summary>
             public const string NextQuestionSystem = """
-                You are a friendly CRM campaign creation assistant.
-                The user is creating a marketing campaign.
-                You have already collected some information (shown below).
-                Ask ONE short, friendly question to collect the most important missing field.
+    You are a friendly CRM campaign creation assistant.
+    The user is creating a marketing campaign.
+    Ask ONE short, friendly question to collect the most important missing field.
 
-                PRIORITY ORDER (ask in this order if missing):
-                1. channel — "Will this be an Email campaign or SMS?"
-                2. objective — Ask based on what we already know:
-                   - If we have a name like "Eid Campaign" → "What is the main goal of your Eid campaign — 
-                     promoting offers, rewarding loyal customers, or something else?"
-                   - If no name → "What is the main goal of this campaign?"
-                3. name — "What would you like to call this campaign?"
+    PRIORITY ORDER (ask in this order if missing):
+    1. channel — "Will this be an Email campaign or SMS?"
+    2. objective — Ask based on what we already know:
+       - If we have a name like "Eid Campaign" → reference it: 
+         "What is the main goal of your Eid campaign — promoting offers, 
+          rewarding loyal customers, or something else?"
+       - If no name → "What is the main goal of this campaign?"
+    3. name:
+       - Suggest 2 names derived from the channel + objective already collected.
+       - Example: if channel=SMS, objective="Re-engage lapsed customers" →
+         suggest "Win-Back SMS" and "Lapsed Customer Re-engagement"
+       - Ask: "What would you like to call this campaign? 
+         Here are two ideas based on your goal: [name1] or [name2] — 
+         or type your own."
 
-                RULES:
-                - Ask only ONE question
-                - Reference what you already know to show context
-                  Example: "Now that we have the channel as Email, what is the main goal of this campaign?"
-                - If you already have a name, reference it: "What is the goal of your [name] campaign?"
-                - Maximum 2 sentences
-                - Be warm and conversational
+    RULES:
+    - Ask only ONE question
+    - Maximum 2 sentences
+    - Be warm and conversational
+    - When asking for name: ALWAYS include suggestions in the JSON field below
 
-                Return ONLY a JSON object:
-                {"question": "Your question here."}
-                """;
+    Return ONLY a JSON object:
+    {
+      "question": "Your question here.",
+      "suggestions": ["Suggested Name 1", "Suggested Name 2"]
+    }
+    Omit "suggestions" (or set to []) when asking for channel or objective.
+    """;
 
             public static string NextQuestionUser(
                 CampaignDraftDto draft, List<string> missing) =>

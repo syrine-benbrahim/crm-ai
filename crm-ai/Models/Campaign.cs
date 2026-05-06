@@ -15,5 +15,11 @@
         // Navigation
         public CampaignContent? Content { get; set; }
         public CampaignSchedule? Schedule { get; set; }
+        public int TotalReach { get; set; }
+        public int Delivered { get; set; }
+        public int Opened { get; set; }
+        public int Clicked { get; set; }
+        public DateTime? StartedAt { get; set; }
+        public DateTime? CompletedAt { get; set; }
     }
 }

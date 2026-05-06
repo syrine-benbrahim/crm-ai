@@ -32,6 +32,7 @@
         public DbSet<CampaignContent> CampaignContents { get; set; }
         public DbSet<CampaignSchedule> CampaignSchedules { get; set; }
         public DbSet<AiUsageRecord> AiUsageRecords { get; set; }
+        
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -67,6 +68,13 @@
                 .WithMany()
                 .HasForeignKey(c => c.SelectionId)
                 .OnDelete(DeleteBehavior.SetNull);
+            modelBuilder.Entity<Transaction>()
+                .Property(t => t.TotalSpend)
+                .HasPrecision(18, 2);
+
+            modelBuilder.Entity<Visit>()
+                .Property(v => v.TransactionValue)
+                .HasPrecision(18, 2);
         }
 
     }

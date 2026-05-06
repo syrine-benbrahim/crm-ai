@@ -1,0 +1,240 @@
+﻿[
+  {
+    "id": "winback_urgency",
+    "version": 1,
+    "type": "email",
+    "name": "Win-back Urgency",
+    "description": "High-pressure re-engagement for lapsed high-value customers",
+    "filePath": "templates/email/winback_urgency.html",
+    "previewImageUrl": "/templates/previews/winback_urgency.png",
+    "supportedObjectives": [ "reactivation", "winback" ],
+    "supportedTones": [ "urgent" ],
+    "supportedChannels": [ "Email" ],
+    "slots": {
+      "subject": {
+        "type": "text",
+        "required": true,
+        "maxLength": 60,
+        "label": "Email subject line"
+      },
+      "preheader": {
+        "type": "text",
+        "required": false,
+        "maxLength": 90,
+        "label": "Preview text"
+      },
+      "hero_headline": {
+        "type": "text",
+        "required": true,
+        "maxLength": 80,
+        "label": "Hero headline"
+      },
+      "body_para_1": {
+        "type": "text",
+        "required": true,
+        "maxLength": 500,
+        "label": "Opening paragraph"
+      },
+      "body_para_2": {
+        "type": "text",
+        "required": false,
+        "maxLength": 500,
+        "label": "Second paragraph"
+      },
+      "cta_text": {
+        "type": "text",
+        "required": true,
+        "maxLength": 25,
+        "label": "Call to action button"
+      },
+      "cta_url": {
+        "type": "url",
+        "required": false,
+        "maxLength": 500,
+        "label": "CTA link"
+      },
+      "first_name": {
+        "type": "personalization",
+        "required": false,
+        "label": "Customer first name"
+      }
+    }
+  },
+  {
+    "id": "retention_friendly",
+    "version": 1,
+    "type": "email",
+    "name": "Retention Friendly",
+    "description": "Warm re-engagement for at-risk customers",
+    "filePath": "templates/email/retention_friendly.html",
+    "previewImageUrl": "/templates/previews/retention_friendly.png",
+    "supportedObjectives": [ "retention" ],
+    "supportedTones": [ "friendly", "informational" ],
+    "supportedChannels": [ "Email" ],
+    "slots": {
+      "subject": {
+        "type": "text",
+        "required": true,
+        "maxLength": 60,
+        "label": "Email subject line"
+      },
+      "preheader": {
+        "type": "text",
+        "required": false,
+        "maxLength": 90,
+        "label": "Preview text"
+      },
+      "hero_headline": {
+        "type": "text",
+        "required": true,
+        "maxLength": 80,
+        "label": "Hero headline"
+      },
+      "body_para_1": {
+        "type": "text",
+        "required": true,
+        "maxLength": 500,
+        "label": "Opening paragraph"
+      },
+      "body_para_2": {
+        "type": "text",
+        "required": false,
+        "maxLength": 500,
+        "label": "Second paragraph"
+      },
+      "cta_text": {
+        "type": "text",
+        "required": true,
+        "maxLength": 25,
+        "label": "Call to action button"
+      },
+      "cta_url": {
+        "type": "url",
+        "required": false,
+        "maxLength": 500,
+        "label": "CTA link"
+      },
+      "first_name": {
+        "type": "personalization",
+        "required": false,
+        "label": "Customer first name"
+      }
+    }
+  },
+  {
+    "id": "promotional_offer",
+    "version": 1,
+    "type": "email",
+    "name": "Promotional Offer",
+    "description": "Offer-led conversion campaign",
+    "filePath": "templates/email/promotional_offer.html",
+    "previewImageUrl": "/templates/previews/promotional_offer.png",
+    "supportedObjectives": [ "conversion" ],
+    "supportedTones": [ "promotional", "urgent" ],
+    "supportedChannels": [ "Email" ],
+    "slots": {
+      "subject": {
+        "type": "text",
+        "required": true,
+        "maxLength": 60,
+        "label": "Email subject line"
+      },
+      "preheader": {
+        "type": "text",
+        "required": false,
+        "maxLength": 90,
+        "label": "Preview text"
+      },
+      "hero_headline": {
+        "type": "text",
+        "required": true,
+        "maxLength": 80,
+        "label": "Hero headline"
+      },
+      "body_para_1": {
+        "type": "text",
+        "required": true,
+        "maxLength": 500,
+        "label": "Body text"
+      },
+      "cta_text": {
+        "type": "text",
+        "required": true,
+        "maxLength": 25,
+        "label": "Call to action button"
+      },
+      "cta_url": {
+        "type": "url",
+        "required": false,
+        "maxLength": 500,
+        "label": "CTA link"
+      },
+      "first_name": {
+        "type": "personalization",
+        "required": false,
+        "label": "Customer first name"
+      }
+    }
+  },
+  {
+    "id": "premium_loyalty",
+    "version": 1,
+    "type": "email",
+    "name": "Premium Loyalty",
+    "description": "Exclusive tone for high-value loyal customers",
+    "filePath": "templates/email/premium_loyalty.html",
+    "previewImageUrl": "/templates/previews/premium_loyalty.png",
+    "supportedObjectives": [ "retention", "upsell" ],
+    "supportedTones": [ "premium" ],
+    "supportedChannels": [ "Email" ],
+    "slots": {
+      "subject": {
+        "type": "text",
+        "required": true,
+        "maxLength": 60,
+        "label": "Email subject line"
+      },
+      "preheader": {
+        "type": "text",
+        "required": false,
+        "maxLength": 90,
+        "label": "Preview text"
+      },
+      "hero_headline": {
+        "type": "text",
+        "required": true,
+        "maxLength": 80,
+        "label": "Hero headline"
+      },
+      "body_para_1": {
+        "type": "text",
+        "required": true,
+        "maxLength": 500,
+        "label": "Opening paragraph"
+      },
+      "body_para_2": {
+        "type": "text",
+        "required": false,
+        "maxLength": 500,
+        "label": "Second paragraph"
+      },
+      "cta_text": {
+        "type": "text",
+        "required": true,
+        "maxLength": 25,
+        "label": "Call to action button"
+      },
+      "cta_url": {
+        "type": "url",
+        "required": false,
+        "maxLength": 500,
+        "label": "CTA link"
+      },
+      "first_name": {
+        "type": "personalization",
+        "required": false,
+        "label": "Customer first name"
+      }
+    }
+  }
+]
